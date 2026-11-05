@@ -1786,17 +1786,19 @@ static void drag_update(HWND h) {
     // 注意 gap 的符号：正数＝光标还压在栏上（离内侧边这么远），负数＝已经离开栏这么多。
     // 所以「回来」是 gap >= -4，「出去」是 gap < -28 —— 写成正数比较的话永远退不出去，
     // 横条会被死死锁在任务栏里，怎么往上拽都不变大窗口。
-    // 双阈值是为了手抖几像素时不来回翻
-    if (hasBar) {
+    // 双阈值是为了手抖几像素时不来回翻。
+    // 只有「从横条起拖」才进这套进出判定：从大窗口起拖时形态全程保持大窗口，
+    // 靠落点框预告位置，松手才落成横条 —— 拖过去的途中就变形会很突兀
+    if (hasBar && g_dragDock) {
         if (gap >= -4)  g_dragAlong = true;
         if (gap < -28)  g_dragAlong = false;
     } else {
         g_dragAlong = false;
     }
 
-    // 形态跟着位置走，正向和反向是同一套规则：贴着任务栏就是横条，离开就展开成大窗口。
-    // 这里直接改窗口尺寸（不是画个虚框预览），所以拖出任务栏的那一帧看到的就是大窗口本体
-    drag_form(h, !g_dragAlong);
+    // 形态跟着位置走：横条起拖时贴栏就是横条、离开就展开成大窗口；
+    // 大窗口起拖时一律保持大窗口，不改尺寸，只靠虚线框提示落点
+    drag_form(h, !(g_dragDock && g_dragAlong));
     W = g_dragW;
     H = g_dragH;
     nx = pt.x - g_dragOffX;
@@ -1851,7 +1853,9 @@ static void drag_update(HWND h) {
                     hx = cross_pos(hw);
                     gapBox = (hx > nx + W) ? (hx - (nx + W)) : (nx - (hx + hw));
                 }
-                hint_show(gapBox <= 8, hx, hy, hw, hh);
+                // 24px 内就算贴住：松手落成横条。太严格的话光标停在框上方一点松手，
+                // 会意外落成浮窗，看着像「没吸附上」
+                hint_show(gapBox <= 24, hx, hy, hw, hh);
             }
         } else {
             hint_hide();
