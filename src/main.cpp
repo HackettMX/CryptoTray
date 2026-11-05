@@ -1826,9 +1826,39 @@ static void drag_update(HWND h) {
             nx = cross_pos(W);
             ny = dock_target_x(H, pt.y - g_dragOffY, lo, hi);
         }
+        hint_hide();      // 已经是横条本体贴在落点上，再画框只会叠一层
+    } else if (hasBar) {
+        // 大窗口还悬在任务栏上方：画一个横条尺寸的落点框，预告松手停在哪。
+        // 框「亮/暗」和松手是否停靠绑在一起：窗口已经贴到框边才算锁定，
+        // 离得远就是暗框（只提示位置，松手仍落成浮窗）
+        if (gap >= -160) {
+            const DWORD now = GetTickCount();
+            if (now - g_dragHintTick >= 60) {
+                g_dragHintTick = now;
+                const int hw = dock_w(), hh = dock_h();
+                LONG lo = 0, hi = 0;
+                taskbar_free_span(lo, hi);
+                int hx = 0, hy = 0, gapBox = 0;
+                if (horiz) {
+                    const int gx = (int)(g_dragFracX * hw);
+                    hx = dock_target_x(hw, pt.x - gx, lo, hi);
+                    hy = cross_pos(hh);
+                    // 窗口底边到框顶的距离（窗口在框上方为正）
+                    gapBox = (hy > ny + H) ? (hy - (ny + H)) : (ny - (hy + hh));
+                } else {
+                    const int gy = (int)(g_dragFracY * hh);
+                    hy = dock_target_x(hh, pt.y - gy, lo, hi);
+                    hx = cross_pos(hw);
+                    gapBox = (hx > nx + W) ? (hx - (nx + W)) : (nx - (hx + hw));
+                }
+                hint_show(gapBox <= 8, hx, hy, hw, hh);
+            }
+        } else {
+            hint_hide();
+        }
+    } else {
+        hint_hide();
     }
-    // 浮窗形态：nx/ny 已经按光标算好，自由跟手，不需要额外的落点框
-    hint_hide();
 
     // 位置没变就不要 SetWindowPos：WM_MOUSEMOVE 和 16ms 轮询会双触发，
     // 一次移动变成两次搬家。另外这里用 SWP_NOZORDER —— 每帧 HWND_TOPMOST 都会把
@@ -1858,12 +1888,13 @@ static void drag_finish(HWND h) {
         return;
     }
 
-    // 落下时是不是停靠：只看拖动结束时贴着任务栏没有。
-    // 拖动过程中形态已经跟着位置实时切好了（贴栏＝横条，离开＝大窗口），
-    // 窗口此刻就在最终落点上，所以不再需要落点框，也不再按光标位置猜
-    const bool toDock = g_dragAlong;
+    // 落下时是不是停靠：
+    //   - 贴栏拖动时形态已经是横条，窗口就在落点上
+    //   - 大窗口拖过来时，落点框亮着（已贴住框边）也算停靠，暗框则只提示位置
+    const bool toDock = g_dragAlong || (g_hintOn && g_hintDock);
     RECT hr;
-    if (!GetWindowRect(h, &hr)) hr = g_dragRect;
+    if (g_hintOn && g_hintDock) hr = g_hintRc;      // 亮着的框才是真正的落点
+    else if (!GetWindowRect(h, &hr)) hr = g_dragRect;
     hint_hide();
 
     if (toDock) {
