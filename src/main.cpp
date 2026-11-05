@@ -137,10 +137,14 @@ static bool g_hidePending = false;
 // 拖动状态（弹窗与设置窗口共用，同一时刻仅一个在拖动）
 static bool g_dragging = false;
 static bool g_dragDock = false;      // 拖动开始时是否处于停靠形态
-static bool g_dragAlong = false;     // 本次拖动是否「沿任务栏挪位置」（锁存，带迟滞）
+static bool g_dragAlong = false;     // 本次拖动是否「贴/沿任务栏」（锁存，带迟滞）
+static bool g_dragFloat = false;     // 拖动中当前是不是浮窗形态（随光标进出任务栏切换）
 static bool g_dragMoved = false;     // 是否真的移动过（区分「单击」与「拖动」）
 static POINT g_dragStart = { 0, 0 };
 static RECT g_dragRect = { 0, 0, 0, 0 };
+static int  g_dragW = 0, g_dragH = 0;      // 当前形态的窗口尺寸（形态切换后会变）
+static int  g_dragOffX = 0, g_dragOffY = 0;// 光标在窗口内的抓取偏移
+static float g_dragFracX = 0.5f, g_dragFracY = 0.5f;  // 抓取点占窗口的比例（切形态时按它换算）
 
 // 设置窗口 UI 状态
 static bool g_setPin = false;
@@ -1114,18 +1118,14 @@ static void dock_present(HWND h) {
 
     RECT rc = { 0, 0, W, H };
     HBRUSH bk = CreateSolidBrush(RGB(0, 0, 0));   // 黑底＝全透明，也是预乘的零点
-    // 拖动中的横条会离开任务栏的浅色底、直接浮在桌面或别的窗口上，纯文字根本看不清。
-    // 这时临时铺一块和浮窗同款的底板，松手落回任务栏再恢复全透明。
-    // 遮罩层要一起铺：alpha 由亮度算出来，只铺颜色层的话底板会是黑底、边缘发黑
-    const bool plate = g_dragging && g_dragMoved;
+    // 这里不铺任何底板：横条形态就是「贴在任务栏上的一层字」，铺白底会把任务栏
+    // 遮成一块白斑。拖动离开任务栏时整体会切换成浮窗形态（alpha_present，自带卡片底色），
+    // 那种形态下的背景由浮窗自己的渲染负责
     HGDIOBJ old = SelectObject(mdc, bmA);
     FillRect(mdc, &rc, bk);
-    if (plate) draw_rounded_rect(mdc, rc, popup_radius(), RGB(255, 255, 255), RGB(255, 255, 255));
     paint_dock(mdc, rc, true);                    // 遮罩：只认覆盖率
     SelectObject(mdc, bmB);                       // 之后一直保持 bmB 选中，提交时要用
     FillRect(mdc, &rc, bk);
-    if (plate) draw_rounded_rect(mdc, rc, popup_radius(),
-                                 RGB(0xFA, 0xFA, 0xFA), RGB(0xDC, 0xDF, 0xE4));
     paint_dock(mdc, rc, false);                   // 真彩
     DeleteObject(bk);
 
@@ -1698,6 +1698,37 @@ static DWORD g_dragHintTick = 0;    // 上次算落点框的时间（节流用�
 static void drag_update(HWND h);
 static void drag_finish(HWND h);
 
+// 拖动中切换形态：贴着任务栏 ＝ 横条，离开 ＝ 大窗口。
+// 直接改窗口尺寸并重绘（不是画个虚框预览），所以拖出任务栏那一瞬间看到的就是大窗口本体；
+// 拖回来贴着任务栏又立刻收成横条，正反两个方向共用这一条规则。
+// 抓取点按比例换算，光标在窗口里的相对位置保持不变，切换时不会「跳一下」
+static void drag_form(HWND h, bool floatForm) {
+    if (g_dragFloat == floatForm) return;
+    g_dragFloat = floatForm;
+
+    // popup_w/popup_h 和后面 paint 的分支全都看这个字段，必须一起改；
+    // 不然会出现「横条尺寸里画竖排列表」这种错位
+    g_cfg.dockTaskbar = !floatForm;
+    g_dragW = popup_w();
+    g_dragH = popup_h();
+
+    int ox = (int)(g_dragFracX * g_dragW);
+    int oy = (int)(g_dragFracY * g_dragH);
+    if (ox < 0) ox = 0;
+    if (oy < 0) oy = 0;
+    if (ox > g_dragW - 1) ox = g_dragW - 1;
+    if (oy > g_dragH - 1) oy = g_dragH - 1;
+    g_dragOffX = ox;
+    g_dragOffY = oy;
+
+    SetWindowPos(h, NULL, 0, 0, g_dragW, g_dragH,
+                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    dock_own();        // 横条挂任务栏当宿主；浮窗必须解除，否则会跟着任务栏一起被挪
+    // 改宿主会重排 Z 序：不重新声明一次层级，拖出来的大窗口可能被别的窗口盖住
+    apply_popup_layers();
+    popup_render(h);
+}
+
 static void drag_update(HWND h) {
     if (!g_dragging) return;
     // 只有真按住左键才跟手：SetCapture 在分层窗口 + 任务栏 owner 下会偶发失效，
@@ -1718,31 +1749,13 @@ static void drag_update(HWND h) {
         if (ddy < 0) ddy = -ddy;
         if (ddx < th && ddy < th) return;
         g_dragMoved = true;
-        popup_render(h);      // 真拖起来了才上底板，单击不会闪一下
     }
-    int W = g_dragRect.right - g_dragRect.left;
-    int H = g_dragRect.bottom - g_dragRect.top;
-    int nx = g_dragRect.left + (pt.x - g_dragStart.x);
-    int ny = g_dragRect.top  + (pt.y - g_dragStart.y);
-
-    // 鼠标按在窗口里的哪一点：落点按这个点对位（而不是窗口中心），拖起来才跟手
-    int grabX0 = g_dragStart.x - g_dragRect.left;
-    int grabY0 = g_dragStart.y - g_dragRect.top;
-    if (grabX0 < 0) grabX0 = 0;
-    if (grabY0 < 0) grabY0 = 0;
-    if (W > 0 && grabX0 > W - 1) grabX0 = W - 1;
-    if (H > 0 && grabY0 > H - 1) grabY0 = H - 1;
-
-    // 拖动中窗口跟着光标走：只夹在整块显示器内（允许压到任务栏上）。
-    // 之前夹在工作区，窗口底边永远到不了任务栏，两态就只能靠光标猜
-    HMONITOR hm = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-    MONITORINFO mi = { sizeof(mi) };
-    GetMonitorInfoW(hm, &mi);
-    RECT mr = mi.rcMonitor;
-    if (nx < mr.left) nx = mr.left;
-    if (ny < mr.top) ny = mr.top;
-    if (nx + W > mr.right) nx = mr.right - W;
-    if (ny + H > mr.bottom) ny = mr.bottom - H;
+    // 尺寸与抓取偏移都取自「当前形态」：形态切换时这两个值会重算，
+    // 所以不能再像以前那样用拖动起点的矩形硬算
+    int W = g_dragW;
+    int H = g_dragH;
+    int nx = pt.x - g_dragOffX;
+    int ny = pt.y - g_dragOffY;
 
     RECT tr, mon;
     const TbDir dir = tb_dir_now(&tr, &mon);
@@ -1761,7 +1774,6 @@ static void drag_update(HWND h) {
         default:        gap = pt.x - tr.left;   break;
         }
     }
-    const bool barOnTop = (dir == TBR_TOP);
 
     // 横条在「交叉轴」上的坐标：横排任务栏嵌进栏内居中；竖排任务栏厚度不够，
     // 塞不进去就贴在内侧（工作区那一侧），沿主轴滑动
@@ -1775,80 +1787,48 @@ static void drag_update(HWND h) {
     // 所以「回来」是 gap >= -4，「出去」是 gap < -28 —— 写成正数比较的话永远退不出去，
     // 横条会被死死锁在任务栏里，怎么往上拽都不变大窗口。
     // 双阈值是为了手抖几像素时不来回翻
-    if (hasBar && g_dragDock) {
+    if (hasBar) {
         if (gap >= -4)  g_dragAlong = true;
         if (gap < -28)  g_dragAlong = false;
     } else {
         g_dragAlong = false;
     }
 
+    // 形态跟着位置走，正向和反向是同一套规则：贴着任务栏就是横条，离开就展开成大窗口。
+    // 这里直接改窗口尺寸（不是画个虚框预览），所以拖出任务栏的那一帧看到的就是大窗口本体
+    drag_form(h, !g_dragAlong);
+    W = g_dragW;
+    H = g_dragH;
+    nx = pt.x - g_dragOffX;
+    ny = pt.y - g_dragOffY;
+
+    // 拖动中窗口跟着光标走：只夹在整块显示器内（允许压到任务栏上）。
+    // 之前夹在工作区，窗口底边永远到不了任务栏，两态就只能靠光标猜
+    HMONITOR hm = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi = { sizeof(mi) };
+    GetMonitorInfoW(hm, &mi);
+    RECT mr = mi.rcMonitor;
+    if (nx < mr.left) nx = mr.left;
+    if (ny < mr.top) ny = mr.top;
+    if (nx + W > mr.right) nx = mr.right - W;
+    if (ny + H > mr.bottom) ny = mr.bottom - H;
+
     if (hasBar && g_dragAlong) {
-        // 沿任务栏拖动：横条按「磁性吸附」直接被吸着走（吸附点都避开邻居），交叉轴锁住。
+        // 贴着任务栏拖动：横条按「磁性吸附」直接被吸着走（吸附点都避开邻居），交叉轴锁住。
         // 期望位置 = 光标按住的那一点，所以空档里就是跟手；靠近两端/邻居时吸上去，
-        // 吸住以后要拉出 SNAP_HOLD 才换位置 —— 这就是「拖到最右贴最右，往左拖一段才动」。
-        // 这时横条自己就在落点上，不再画落点框（叠一层只会把它盖住）
+        // 吸住以后要拉出 SNAP_HOLD 才换位置 —— 这就是「拖到最右贴最右，往左拖一段才动」
         LONG lo = 0, hi = 0;
         taskbar_free_span(lo, hi);
         if (horiz) {
             ny = cross_pos(H);
-            nx = dock_target_x(W, pt.x - grabX0, lo, hi);
+            nx = dock_target_x(W, pt.x - g_dragOffX, lo, hi);
         } else {
             nx = cross_pos(W);
-            ny = dock_target_x(H, pt.y - grabY0, lo, hi);
+            ny = dock_target_x(H, pt.y - g_dragOffY, lo, hi);
         }
-        hint_hide();
-    } else if (hasBar && g_dragDock) {
-        // 横条离开任务栏：本体继续跟着光标，落点框改成「大窗口」的尺寸 ——
-        // 和「大窗口拖向任务栏」完全对称，只是方向反过来。松手按框落成大窗口
-        const int fw = float_w(), fh = float_h();
-        int fx = pt.x - ((W > 0) ? grabX0 * fw / W : fw / 2);
-        int fy = pt.y - ((H > 0) ? grabY0 * fh / H : fh / 2);
-        if (fx < mr.left) fx = mr.left;
-        if (fy < mr.top) fy = mr.top;
-        if (fx + fw > mr.right) fx = mr.right - fw;
-        if (fy + fh > mr.bottom) fy = mr.bottom - fh;
-        // 节流 20ms：鼠标消息 + 16ms 轮询会双触发，不节流就是 120Hz 重画整个大框
-        const DWORD now = GetTickCount();
-        if (now - g_dragHintTick >= 20) {
-            g_dragHintTick = now;
-            hint_show(false, fx, fy, fw, fh);
-        }
-    } else if (hasBar) {
-        // 从大窗口拖向任务栏：算落点框。目标位置要查邻居（EnumWindows），
-        // 节流到 ~60ms 一次；hint_show 内部还会跳过没有变化的重绘。
-        // 触发距离从 96px 放到 160px：一路拖到任务栏跟前才出框，中间那段是空的。
-        // 同样是负数比较：浮窗在栏外，gap <= -160 表示还在 160px 之外，不提示
-        if (gap >= -160) {
-            const DWORD now = GetTickCount();
-            if (now - g_dragHintTick >= 60) {
-                g_dragHintTick = now;
-                const int hw = dock_w(), hh = dock_h();
-                LONG lo = 0, hi = 0;
-                taskbar_free_span(lo, hi);
-                // 落点框画在真正的落点上（同样走磁性吸附），松手就落在这里。
-                // 抓取点按落点尺寸换算：竖排浮窗和横条宽度差得多，直接用会偏出去
-                int hx = 0, hy = 0, gapBox = 0;
-                if (horiz) {
-                    const int gx = (W > 0) ? grabX0 * hw / W : hw / 2;
-                    hx = dock_target_x(hw, pt.x - gx, lo, hi);
-                    hy = cross_pos(hh);
-                    gapBox = barOnTop ? (ny - (hy + hh)) : (hy - (ny + H));
-                } else {
-                    const int gy = (H > 0) ? grabY0 * hh / H : hh / 2;
-                    hy = dock_target_x(hh, pt.y - gy, lo, hi);
-                    hx = cross_pos(hw);
-                    gapBox = (dir == TBR_LEFT) ? (hx - (nx + W)) : (nx - (hx + hw));
-                }
-                // 窗口边缘贴住虚线框（差 8px 内）→ 松手即固定；光标已经压进栏里也算锁定
-                const bool locked = (gapBox <= 8) || (gap >= -8);
-                hint_show(locked, hx, hy, hw, hh);
-            }
-        } else {
-            hint_hide();
-        }
-    } else {
-        hint_hide();
     }
+    // 浮窗形态：nx/ny 已经按光标算好，自由跟手，不需要额外的落点框
+    hint_hide();
 
     // 位置没变就不要 SetWindowPos：WM_MOUSEMOVE 和 16ms 轮询会双触发，
     // 一次移动变成两次搬家。另外这里用 SWP_NOZORDER —— 每帧 HWND_TOPMOST 都会把
@@ -1878,24 +1858,12 @@ static void drag_finish(HWND h) {
         return;
     }
 
-    // 落下时是不是停靠：
-    //   - 弹过落点框：以落点框亮没亮为准；
-    //   - 本次是「沿任务栏拖」：一律停靠。手拖时光标难免抬离任务栏几十像素，
-    //     按光标判会把它误判成「拖出任务栏」，横条突然变成浮窗；
-    //     真想拖出去，得先抬离 1.5 个任务栏高，那时 g_dragAlong 已经退出
-    //   - 其它情况（从浮窗拖过来）：看光标在不在任务栏里
-    bool toDock;
-    if (g_hintOn) {
-        toDock = g_hintDock;
-    } else if (g_dragAlong) {
-        toDock = true;
-    } else {
-        POINT cp; GetCursorPos(&cp);
-        RECT tr0, mon0;
-        toDock = taskbar_rect(tr0, mon0) && PtInRect(&tr0, cp);
-    }
-    RECT hr = g_hintRc;
-    if (!g_hintOn) { RECT r; GetWindowRect(h, &r); hr = r; }
+    // 落下时是不是停靠：只看拖动结束时贴着任务栏没有。
+    // 拖动过程中形态已经跟着位置实时切好了（贴栏＝横条，离开＝大窗口），
+    // 窗口此刻就在最终落点上，所以不再需要落点框，也不再按光标位置猜
+    const bool toDock = g_dragAlong;
+    RECT hr;
+    if (!GetWindowRect(h, &hr)) hr = g_dragRect;
     hint_hide();
 
     if (toDock) {
@@ -1980,6 +1948,23 @@ static LRESULT CALLBACK PopupProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         dock_snap_reset();          // 每次拖动从「没吸住」开始，按当前光标重新找吸附点
         GetCursorPos(&g_dragStart);
         GetWindowRect(h, &g_dragRect);
+        g_dragW = g_dragRect.right - g_dragRect.left;
+        g_dragH = g_dragRect.bottom - g_dragRect.top;
+        g_dragFloat = !g_cfg.dockTaskbar;
+        {
+            // 抓取点同时记「绝对偏移」和「比例」：同形态拖动用绝对偏移跟手，
+            // 切形态（横条↔大窗口）时用比例换算，光标才不会在窗口里跳位置
+            int gx = g_dragStart.x - g_dragRect.left;
+            int gy = g_dragStart.y - g_dragRect.top;
+            if (gx < 0) gx = 0;
+            if (gy < 0) gy = 0;
+            if (g_dragW > 1 && gx > g_dragW - 1) gx = g_dragW - 1;
+            if (g_dragH > 1 && gy > g_dragH - 1) gy = g_dragH - 1;
+            g_dragOffX = gx;
+            g_dragOffY = gy;
+            g_dragFracX = (g_dragW > 0) ? (float)gx / (float)g_dragW : 0.5f;
+            g_dragFracY = (g_dragH > 0) ? (float)gy / (float)g_dragH : 0.5f;
+        }
         SetCapture(h);
         hint_hide();
         SetTimer(h, 5, 16, NULL);   // 轮询兜底：捕获丢了也不会「拖到一半不动」
