@@ -1439,13 +1439,23 @@ static void drag_finish(HWND h);
 
 static void drag_update(HWND h) {
     if (!g_dragging) return;
+    // 只有真按住左键才跟手：SetCapture 在分层窗口 + 任务栏 owner 下会偶发失效，
+    // 松手消息可能落到别的窗口上。这时若只看光标位移，一次「点完就滑走」会被当成拖动，
+    // 甚至把横条拖出任务栏、把位置写进配置
+    if (!(GetAsyncKeyState(VK_LBUTTON) & 0x8000)) {
+        if (g_dragMoved || GetTickCount() - g_dragTick > 150) drag_finish(h);
+        return;
+    }
     POINT pt; GetCursorPos(&pt);
-    // 位移不足 3px 当作单击：否则点一下横条就会把它变成浮窗
+    // 位移门槛：鼠标点一下常有几像素手抖，3px 太敏感，一点就进了拖动、弹出落点框，
+    // 看上去就是「点一下闪一下」。已经停靠时更要高一些——那样只是沿任务栏挪位置，
+    // 不值得为一次点击去改写偏移量
     if (!g_dragMoved) {
+        const int th = g_dragDock ? 12 : 6;
         int ddx = pt.x - g_dragStart.x, ddy = pt.y - g_dragStart.y;
         if (ddx < 0) ddx = -ddx;
         if (ddy < 0) ddy = -ddy;
-        if (ddx < 3 && ddy < 3) return;
+        if (ddx < th && ddy < th) return;
         g_dragMoved = true;
     }
     int W = g_dragRect.right - g_dragRect.left;
@@ -1474,7 +1484,9 @@ static void drag_update(HWND h) {
     bool nearBar = false, locked = false;
     int hx = nx, hy = ny, hw = W, hh = H;
     RECT tr, mon;
-    if (taskbar_rect(tr, mon) && (tr.right - tr.left) > (tr.bottom - tr.top)) {
+    const bool hasBar = taskbar_rect(tr, mon) && (tr.right - tr.left) > (tr.bottom - tr.top);
+    const bool cursorOnBar = hasBar && PtInRect(&tr, pt);
+    if (hasBar) {
         const int trayH = tr.bottom - tr.top;
         const bool barOnTop = (tr.top <= mon.top + 2);          // 任务栏吸顶的情况
         const int gap = barOnTop ? (ny - tr.bottom)             // 窗口顶边到任务栏底边
@@ -1499,8 +1511,10 @@ static void drag_update(HWND h) {
                      (barOnTop ? (pt.y <= tr.bottom) : (pt.y >= tr.top));
         }
     }
-    if (nearBar) hint_show(locked, hx, hy, hw, hh);
-    else         hint_hide();
+    // 已经是横条、光标也还在任务栏里：这只是在沿任务栏挪位置，不需要落点框；
+    // 点一下（带几像素手抖）更不该弹出框来闪一下
+    if (nearBar && !(g_dragDock && cursorOnBar)) hint_show(locked, hx, hy, hw, hh);
+    else                                         hint_hide();
 }
 
 static void drag_finish(HWND h) {
@@ -1515,8 +1529,18 @@ static void drag_finish(HWND h) {
         return;
     }
 
-    const bool toDock = (g_hintOn && g_hintDock);
-    const RECT hr = g_hintRc;
+    // 没弹过落点框（例如沿任务栏挪位置时被刻意抑制）就按光标判落点，
+    // 否则一次手抖拖动会把横条直接变回浮窗
+    bool toDock;
+    if (g_hintOn) {
+        toDock = g_hintDock;
+    } else {
+        POINT cp; GetCursorPos(&cp);
+        RECT tr0, mon0;
+        toDock = taskbar_rect(tr0, mon0) && PtInRect(&tr0, cp);
+    }
+    RECT hr = g_hintRc;
+    if (!g_hintOn) { RECT r; GetWindowRect(h, &r); hr = r; }
     hint_hide();
 
     if (toDock) {
