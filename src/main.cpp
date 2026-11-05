@@ -1,10 +1,14 @@
 #define _CRT_SECURE_NO_WARNINGS
+// 启用 comctl32 v6：EM_SETCUEBANNER（输入框占位提示）和现代滚动条都依赖它
+#pragma comment(linker, "/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #include <windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
 #include <commctrl.h>
 #include <process.h>
 #include <dwmapi.h>
+#include <objidl.h>
+#include <gdiplus.h>      // 圆角/圆形抗锯齿：GDI 的 RoundRect、Ellipse 是硬像素台阶
 #include <string>
 #include <vector>
 #include <map>
@@ -150,8 +154,10 @@ static int  g_sliderDrag = 0;        // 0=无，1=不透明度滑块，2=宽度�
 static int  g_widthVal = 300;        // 宽度滑块当前值（260-460）
 static HWND g_hoverBtn = NULL;
 static bool g_trackMouse = false;
+static void hook_hover(HWND b);      // 自绘按钮的 hover 上报（定义在设置窗部分）
 
 static DWORD g_lastPreviewAt = 0;    // 透明度预览节流
+static ULONG_PTR g_gdiplusToken = 0; // GDI+ 只初始化一次，用于抗锯齿绘制
 
 // 托盘单击/双击判定
 static DWORD g_lastTrayClick = 0;
@@ -398,16 +404,55 @@ static void enable_dwm_effects(HWND h) {
     DwmSetWindowAttribute(h, DWMWA_BORDER_COLOR, &borderClr, sizeof(borderClr));
 }
 
+// ---- 抗锯齿圆角矩形 ----
+// GDI 的 RoundRect / Ellipse 不做抗锯齿，1px 的斜面全是硬台阶，缩放到 100%/125% 都很脏。
+// 这里走 GDI+ 的路径填充：边缘像素按覆盖率混合，边缘就平滑了。
+// 前提是调用前 DC 里已经是正确的底色（否则混合的是一层灰，反而更脏）。
+static void aa_round_rect(HDC dc, const RECT& rc, float radius, COLORREF fill,
+                          COLORREF border, float bw = 1.0f) {
+    const float W = (float)(rc.right - rc.left);
+    const float H = (float)(rc.bottom - rc.top);
+    if (W <= 0 || H <= 0) return;
+
+    Gdiplus::Graphics g(dc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    // 像素中心对齐，否则 1px 描边会糊成两像素
+    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+
+    float x = (float)rc.left, y = (float)rc.top, w = W, h = H;
+    if (bw > 0.0f) {                 // 描边居中于路径，内缩半个线宽才不越界
+        const float d = bw * 0.5f;
+        x += d; y += d; w -= bw; h -= bw;
+        if (w <= 0 || h <= 0) return;
+    }
+    if (radius > w * 0.5f) radius = w * 0.5f;
+    if (radius > h * 0.5f) radius = h * 0.5f;
+    if (radius < 0.0f) radius = 0.0f;
+
+    Gdiplus::GraphicsPath path;
+    if (radius < 0.5f) {
+        path.AddRectangle(Gdiplus::RectF(x, y, w, h));
+    } else {
+        const float d = radius * 2.0f;
+        path.AddArc(x, y, d, d, 180.0f, 90.0f);
+        path.AddArc(x + w - d, y, d, d, 270.0f, 90.0f);
+        path.AddArc(x + w - d, y + h - d, d, d, 0.0f, 90.0f);
+        path.AddArc(x, y + h - d, d, d, 90.0f, 90.0f);
+        path.CloseFigure();
+    }
+
+    Gdiplus::SolidBrush brush(Gdiplus::Color(255, GetRValue(fill), GetGValue(fill), GetBValue(fill)));
+    g.FillPath(&brush, &path);
+
+    if (bw > 0.0f && border != fill) {
+        Gdiplus::Pen pen(Gdiplus::Color(255, GetRValue(border), GetGValue(border), GetBValue(border)), bw);
+        g.DrawPath(&pen, &path);
+    }
+}
+
+// radius 沿用老接口语义：传的是圆角椭圆的「直径」，视觉半径要减半
 static void draw_rounded_rect(HDC dc, const RECT& rc, int radius, COLORREF fill, COLORREF border) {
-    HBRUSH brush = CreateSolidBrush(fill);
-    HPEN pen = CreatePen(PS_SOLID, 1, border);
-    HGDIOBJ ob = SelectObject(dc, brush);
-    HGDIOBJ op = SelectObject(dc, pen);
-    RoundRect(dc, rc.left, rc.top, rc.right, rc.bottom, radius, radius);
-    SelectObject(dc, ob);
-    SelectObject(dc, op);
-    DeleteObject(brush);
-    DeleteObject(pen);
+    aa_round_rect(dc, rc, radius * 0.5f, fill, border, 1.0f);
 }
 
 // ---- 绘制迷你走势线 ----
@@ -900,6 +945,12 @@ static void alpha_present(HWND h) {
 
     HGDIOBJ old = SelectObject(mdc, bm);
     RECT rc = { 0, 0, W, H };
+    // DIB 初值全 0（黑），抗锯齿的边沿像素会跟黑混出一圈脏边，先铺白底
+    {
+        HBRUSH wb = CreateSolidBrush(RGB(0xFF, 0xFF, 0xFF));
+        FillRect(mdc, &rc, wb);
+        DeleteObject(wb);
+    }
     paint_popup(mdc, rc);
     // GDI 是延迟批处理的：不 flush 就直接读 DIB 内存会读到全 0，
     // 于是 alpha 和颜色全算错，窗口看着是一块底色或者干脆透明
@@ -912,15 +963,23 @@ static void alpha_present(HWND h) {
         for (int x = 0; x < W; x++) {
             BYTE* p = q + (y * W + x) * 4;
             int cov = 255;
-            if (rad > 0) {                        // 圆角外做软裁，四角才不会露出直角白边
-                int dx = 0, dy = 0;
-                if (x < rad)           dx = rad - x;
-                else if (x >= W - rad) dx = x - (W - rad - 1);
-                if (y < rad)           dy = rad - y;
-                else if (y >= H - rad) dy = y - (H - rad - 1);
-                if (dx > 0 && dy > 0 && (dx * dx + dy * dy) >= rad * rad) cov = 0;
+            // 圆角外做软裁：4x4 超采样算覆盖率，边界才不会是一刀切的硬台阶
+            if (rad > 0 && (x < rad || x >= W - rad) && (y < rad || y >= H - rad)) {
+                int hit = 0;
+                for (int sy = 0; sy < 4; sy++) {
+                    float py = (float)y + (sy + 0.5f) * 0.25f;
+                    float dy = (py < rad) ? (rad - py)
+                             : (py > H - rad ? py - (H - rad) : 0.0f);
+                    for (int sx = 0; sx < 4; sx++) {
+                        float px = (float)x + (sx + 0.5f) * 0.25f;
+                        float dx = (px < rad) ? (rad - px)
+                                 : (px > W - rad ? px - (W - rad) : 0.0f);
+                        if (dx * dx + dy * dy <= (float)rad * rad) hit++;
+                    }
+                }
+                cov = hit * 255 / 16;
             }
-            const int al = cov ? a : 0;
+            const int al = a * cov / 255;
             p[0] = (BYTE)(p[0] * al / 255);       // 预乘 alpha
             p[1] = (BYTE)(p[1] * al / 255);
             p[2] = (BYTE)(p[2] * al / 255);
@@ -1672,7 +1731,8 @@ static void draw_field(HDC dc, RECT rc, bool focus) {
 
 static void draw_card(HDC dc, int y, int h) {
     RECT rc = { CARD_X, y, CARD_X + CARD_W, y + h };
-    draw_rounded_rect(dc, rc, 12, RGB(0xFF, 0xFF, 0xFF), RGB(0xEB, 0xEE, 0xF3));
+    // 22 是圆角椭圆直径，视觉半径 11px，接近效果图的 10px
+    draw_rounded_rect(dc, rc, 22, RGB(0xFF, 0xFF, 0xFF), RGB(0xE9, 0xEC, 0xF1));
 }
 
 // 自绘滑块（轨道 + 进度 + 圆形滑钮）
@@ -1749,7 +1809,7 @@ static void draw_settings(HWND h, HDC dc, const RECT& rc) {
 
     // ---- 卡片 1：刷新频率 ----
     draw_card(dc, 76, 142);
-    ui_text(dc, fS, SUB, TR(L"sec.rate"), RECT{ 32, 86, 300, 106 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    ui_text(dc, fS, TXT, TR(L"sec.rate"), RECT{ 32, 86, 300, 106 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     ui_text(dc, fN, TXT, TR(L"set.bg_interval"), RECT{ 32, 112, 260, 144 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     draw_field(dc, RECT{ FIELD_X, 112, FIELD_X + FIELD_W, 144 }, GetFocus() == GetDlgItem(h, IDC_BG));
@@ -1778,20 +1838,16 @@ static void draw_settings(HWND h, HDC dc, const RECT& rc) {
 
     // ---- 卡片 2：关注币种 ----
     draw_card(dc, 230, 218);
-    ui_text(dc, fS, SUB, TR(L"sec.coins"), RECT{ 32, 240, 200, 260 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    ui_text(dc, fM, SUB, TR(L"set.coin_hint"), RECT{ 240, 240, 408, 260 }, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+    ui_text(dc, fS, TXT, TR(L"sec.coins"), RECT{ 32, 240, 200, 260 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    // 占位提示已放进输入框（EM_SETCUEBANNER），标题行不再重复
 
-    // 列表底槽
-    {
-        RECT box = { 32, 268, 408, 390 };
-        draw_rounded_rect(dc, box, 10, RGB(0xFF, 0xFF, 0xFF), RGB(0xE3, 0xE7, 0xEE));
-    }
+    // 列表不再套外框：每行自己就是一张圆角字段（效果图的做法）
     // 输入框底槽
     draw_field(dc, RECT{ 32, 398, 250, 432 }, GetFocus() == GetDlgItem(h, IDC_COIN));
 
     // ---- 卡片 3：数据源 ----
     draw_card(dc, 460, 112);
-    ui_text(dc, fS, SUB, TR(L"sec.source"), RECT{ 32, 466, 200, 486 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    ui_text(dc, fS, TXT, TR(L"sec.source"), RECT{ 32, 466, 200, 486 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     ui_text(dc, fM, SUB, TR(L"set.source_hint"),
         RECT{ 180, 466, 408, 486 }, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
     // 按钮由 8 个自绘 BUTTON 承载，这里只画底槽外的空白（选中态在 WM_DRAWITEM 里画）
@@ -1805,7 +1861,7 @@ static void draw_settings(HWND h, HDC dc, const RECT& rc) {
 
     // ---- 卡片 4：走势图周期 ----
     draw_card(dc, 584, 138);
-    ui_text(dc, fS, SUB, TR(L"sec.bars"), RECT{ 32, 594, 200, 614 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    ui_text(dc, fS, TXT, TR(L"sec.bars"), RECT{ 32, 594, 200, 614 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     ui_text(dc, fM, SUB, TR(L"set.bars_hint"), RECT{ 240, 594, 408, 614 }, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
     for (int i = 0; i < kBarsCount; i++) {
@@ -1814,7 +1870,8 @@ static void draw_settings(HWND h, HDC dc, const RECT& rc) {
         COLORREF fill   = sel ? ACCENT : RGB(0xFF, 0xFF, 0xFF);
         COLORREF border = sel ? ACCENT : RGB(0xE3, 0xE7, 0xEE);
         draw_rounded_rect(dc, br, 8, fill, border);
-        ui_text(dc, fM, sel ? RGB(0xFF, 0xFF, 0xFF) : RGB(0x3A, 0x40, 0x48),
+        ui_text(dc, sel ? (HFONT)GetPropW(h, L"fontSmallAA") : fM,
+                sel ? RGB(0xFF, 0xFF, 0xFF) : RGB(0x3A, 0x40, 0x48),
                 TR(kBars[i].label), br, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
     ui_text(dc, fM, RGB(0xA0, 0xA7, 0xB0), TR(L"set.bars_note"),
@@ -1822,7 +1879,7 @@ static void draw_settings(HWND h, HDC dc, const RECT& rc) {
 
     // ---- 卡片 5：外观 ----
     draw_card(dc, 734, 228);
-    ui_text(dc, fS, SUB, TR(L"sec.look"), RECT{ 32, 740, 200, 762 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    ui_text(dc, fS, TXT, TR(L"sec.look"), RECT{ 32, 740, 200, 762 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     ui_text(dc, fN, TXT, TR(L"set.pin"), RECT{ 32, 765, 348, 795 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     ui_text(dc, fN, TXT, TR(L"set.through"), RECT{ 32, 797, 348, 827 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
@@ -2013,6 +2070,27 @@ static void close_settings(HWND h) {
     DestroyWindow(h);
 }
 
+// 币种列表：点右侧的删除叉直接删掉这一行（列表是子窗口，父窗口收不到点击）
+static LRESULT CALLBACK CoinListSubclass(HWND h, UINT m, WPARAM w, LPARAM l) {
+    WNDPROC old = (WNDPROC)GetPropW(h, L"oldprocList");
+    if (m == WM_LBUTTONDOWN) {
+        POINT p = { GET_X_LPARAM(l), GET_Y_LPARAM(l) };
+        LRESULT r = SendMessageW(h, LB_ITEMFROMPOINT, 0, MAKELPARAM(p.x, p.y));
+        int idx = (int)LOWORD(r);
+        if (HIWORD(r) == 0 && idx >= 0) {
+            RECT ir = { 0 };
+            if (SendMessageW(h, LB_GETITEMRECT, idx, (LPARAM)&ir)) {
+                if (p.x >= ir.right - 40) {        // 落在删除叉上
+                    SendMessageW(h, LB_SETCURSEL, idx, 0);
+                    on_del(GetParent(h));
+                    return 0;
+                }
+            }
+        }
+    }
+    return CallWindowProcW(old, h, m, w, l);
+}
+
 static void create_settings_controls(HWND h) {
     g_setPin = g_cfg.pinToDesktop;
     g_setThrough = g_cfg.mouseThrough;
@@ -2040,6 +2118,11 @@ static void create_settings_controls(HWND h) {
     SetPropW(h, L"fontSection", (HANDLE)fontSection);
     SetPropW(h, L"fontNormal", (HANDLE)fontNormal);
     SetPropW(h, L"fontSmall", (HANDLE)fontSmall);
+    // ClearType 是次像素渲染，在橙色实心块上会出粉/绿彩边；橙底文字单独用灰度抗锯齿字体
+    HFONT fontNormalAA = CreateFontW(-13, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, ANTIALIASED_QUALITY, 0, L"Microsoft YaHei");
+    HFONT fontSmallAA  = CreateFontW(-11, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, ANTIALIASED_QUALITY, 0, L"Microsoft YaHei");
+    SetPropW(h, L"fontNormalAA", (HANDLE)fontNormalAA);
+    SetPropW(h, L"fontSmallAA", (HANDLE)fontSmallAA);
 
     SetWindowTheme(h, L"", L""); // 禁用子控件默认主题，便于自绘
 
@@ -2061,14 +2144,18 @@ static void create_settings_controls(HWND h) {
     HWND lb = CreateWindowExW(0, L"LISTBOX", L"",
         WS_VISIBLE | WS_CHILD | LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS |
         WS_VSCROLL | WS_TABSTOP | LBS_NOINTEGRALHEIGHT,
-        38, 274, 364, 110, h, (HMENU)IDC_LIST, g_hInst, NULL);
-    SendMessageW(lb, LB_SETITEMHEIGHT, 0, MAKELPARAM(28, 0));
+        38, 272, 364, 108, h, (HMENU)IDC_LIST, g_hInst, NULL);
+    SendMessageW(lb, LB_SETITEMHEIGHT, 0, MAKELPARAM(36, 0));   // 一行 36px：字段 + 标签 + 删除叉
+    SetPropW(lb, L"oldprocList",
+             (HANDLE)SetWindowLongPtrW(lb, GWLP_WNDPROC, (LONG_PTR)CoinListSubclass));
     SetWindowTheme(lb, L"", L"");
     for (const auto& c : g_cfg.coins) SendMessageW(lb, LB_ADDSTRING, 0, (LPARAM)to_w(c).c_str());
 
     HWND ec = CreateWindowExW(0, L"EDIT", L"", WS_VISIBLE | WS_CHILD | ES_UPPERCASE | ES_AUTOHSCROLL | WS_TABSTOP,
         42, 403, 198, 22, h, (HMENU)IDC_COIN, g_hInst, NULL);
     SendMessageW(ec, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELONG(2, 2));
+    // 占位提示直接放进输入框（效果图的做法），省掉上面一行提示文字
+    SendMessageW(ec, EM_SETCUEBANNER, TRUE, (LPARAM)TR(L"set.coin_hint"));
 
     CreateWindowExW(0, L"BUTTON", L"", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW | WS_TABSTOP,
         258, 398, 68, 34, h, (HMENU)IDC_ADD, g_hInst, NULL);
@@ -2106,12 +2193,172 @@ static void create_settings_controls(HWND h) {
     // 子控件字体
     EnumChildWindows(h, [](HWND child, LPARAM) -> BOOL {
         SendMessageW(child, WM_SETFONT, (WPARAM)GetPropW(GetParent(child), L"fontNormal"), TRUE);
+        // 自绘按钮统一接管 hover（父窗口收不到子控件上的鼠标消息）
+        wchar_t cls[32] = { 0 };
+        GetClassNameW(child, cls, _countof(cls));
+        if (lstrcmpiW(cls, L"Button") == 0) hook_hover(child);
         return TRUE;
     }, 0);
 }
 
-static LRESULT CALLBACK SettingsProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+static void aa_line(HDC dc, int x1, int y1, int x2, int y2, COLORREF c, float w) {
+    Gdiplus::Graphics g(dc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+    Gdiplus::Pen pen(Gdiplus::Color(255, GetRValue(c), GetGValue(c), GetBValue(c)), w);
+    pen.SetStartCap(Gdiplus::LineCapRound);
+    pen.SetEndCap(Gdiplus::LineCapRound);
+    g.DrawLine(&pen, (float)x1, (float)y1, (float)x2, (float)y2);
+}
+
+// 单个自绘控件的绘制。坐标系是控件自身（0,0 起），底色已由调用方铺好。
+static void paint_ownerdraw(HWND parent, HWND item, HDC dc, const RECT& rc,
+                            int id, UINT state, UINT itemID) {
+    bool hover = (g_hoverBtn == item);
+    SetBkMode(dc, TRANSPARENT);
+
+    if (id == IDC_LIST) {
+        // 自绘列表项：一行一个圆角字段，右侧是类型标签 + 删除叉
+        if (itemID == (UINT)-1) return;
+        bool sel = (state & ODS_SELECTED) != 0;
+        RECT r = rc; InflateRect(&r, -2, -3);
+        COLORREF fill   = sel ? RGB(0xFF, 0xF3, 0xE4) : RGB(0xFF, 0xFF, 0xFF);
+        COLORREF border = sel ? RGB(0xFA, 0xC9, 0x93) : RGB(0xE6, 0xE9, 0xEF);
+        draw_rounded_rect(dc, r, 16, fill, border);
+
+        wchar_t buf[128] = { 0 };
+        SendMessageW(item, LB_GETTEXT, itemID, (LPARAM)buf);
+
+        // 合约类型：带 -SWAP / -PERP 后缀的是永续，其余按现货
+        std::wstring sym = buf;
+        bool perp = sym.find(L"-SWAP") != std::wstring::npos ||
+                    sym.find(L"-PERP") != std::wstring::npos;
+        RECT tagr = { r.right - 74, r.top, r.right - 34, r.bottom };
+        ui_text(dc, (HFONT)GetPropW(parent, L"fontSmall"), RGB(0x9A, 0xA0, 0xA6),
+                perp ? TR(L"tag.perp") : TR(L"tag.spot"), tagr,
+                DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+
+        // 删除叉
+        const int cx = r.right - 20, cy = (r.top + r.bottom) / 2;
+        COLORREF xc = sel ? RGB(0xB4, 0x6A, 0x14) : RGB(0x9A, 0xA0, 0xA6);
+        aa_line(dc, cx - 4, cy - 4, cx + 4, cy + 4, xc, 1.4f);
+        aa_line(dc, cx + 4, cy - 4, cx - 4, cy + 4, xc, 1.4f);
+
+        RECT nr = { r.left + 12, r.top, r.right - 78, r.bottom };
+        ui_text(dc, (HFONT)GetPropW(parent, L"fontNormal"),
+                sel ? RGB(0xA0, 0x54, 0x0B) : RGB(0x1F, 0x23, 0x28),
+                buf, nr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        return;
+    }
+
+    if (id == IDC_CLOSE) {
+        COLORREF bg = hover ? RGB(0xEE, 0xF0, 0xF3) : RGB(0xFF, 0xFF, 0xFF);
+        draw_rounded_rect(dc, rc, 16, bg, bg);
+        int cx = (rc.left + rc.right) / 2, cy = (rc.top + rc.bottom) / 2, s = 6;
+        aa_line(dc, cx - s, cy - s, cx + s, cy + s,
+                hover ? RGB(0x1F, 0x23, 0x28) : RGB(0x6B, 0x72, 0x80), 1.6f);
+        aa_line(dc, cx + s, cy - s, cx - s, cy + s,
+                hover ? RGB(0x1F, 0x23, 0x28) : RGB(0x6B, 0x72, 0x80), 1.6f);
+    } else if (id == IDC_PIN_SW || id == IDC_THROUGH || id == IDC_TOPMOST || id == IDC_DOCK_SW) {
+        // 开关式控件
+        bool val = (id == IDC_PIN_SW) ? g_setPin
+                 : (id == IDC_THROUGH) ? g_setThrough
+                 : (id == IDC_DOCK_SW) ? g_setDock : g_setTop;
+        const float rad = (rc.bottom - rc.top) * 0.5f;
+        COLORREF on = RGB(0xF7, 0x93, 0x1A);
+        COLORREF off = RGB(0xCF, 0xD3, 0xDA);
+        aa_round_rect(dc, rc, rad, val ? on : off, val ? on : off, 0.0f);
+        // 旋钮：圆形同样要抗锯齿，否则边缘一圈台阶很明显
+        const float kr = rad - 3.0f;
+        const int kx = val ? (rc.right - (int)rad) : (rc.left + (int)rad);
+        RECT knob = { kx - (int)kr, rc.top + 3, kx + (int)kr, rc.bottom - 3 };
+        aa_round_rect(dc, knob, kr, RGB(0xFF, 0xFF, 0xFF), RGB(0xFF, 0xFF, 0xFF), 0.0f);
+    } else if (id >= IDC_LANG_BASE && id < IDC_LANG_BASE + 8) {
+        // 语言胶囊：当前语言橙色实心，其余白底细边
+        int li = id - IDC_LANG_BASE;
+        if (li >= i18n::count()) return;
+        bool sel = (li == i18n::current());
+        bool pressed = (state & ODS_SELECTED) != 0;
+        COLORREF fill = sel ? (pressed ? RGB(0xEF, 0x86, 0x0C) : RGB(0xF7, 0x93, 0x1A))
+                            : (hover ? RGB(0xF3, 0xF5, 0xF9) : RGB(0xFF, 0xFF, 0xFF));
+        COLORREF border = sel ? fill : (hover ? RGB(0xD8, 0xDD, 0xE6) : RGB(0xE3, 0xE7, 0xEE));
+        RECT br = rc;
+        InflateRect(&br, -1, -1);
+        // 全圆角：半径取高度一半，才是胶囊形（原来是 12/2=6，看着像方角）
+        aa_round_rect(dc, br, (br.bottom - br.top) * 0.5f, fill, border, 1.0f);
+        ui_text(dc, (HFONT)GetPropW(parent, sel ? L"fontSmallAA" : L"fontSmall"),
+                sel ? RGB(0xFF, 0xFF, 0xFF) : RGB(0x3A, 0x40, 0x48),
+                i18n::native_name(li), rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    } else if (id >= IDC_PF_BASE && id < IDC_PF_BASE + 8) {
+        // 数据源按钮：选中橙色实心，未选中白底 + 细边
+        int pf = id - IDC_PF_BASE;
+        bool sel = (pf == g_setPlatform);
+        bool pressed = (state & ODS_SELECTED) != 0;
+        COLORREF fill = sel ? (pressed ? RGB(0xEF, 0x86, 0x0C) : RGB(0xF7, 0x93, 0x1A))
+                            : (hover ? RGB(0xF3, 0xF5, 0xF9) : RGB(0xFF, 0xFF, 0xFF));
+        COLORREF border = sel ? fill : (hover ? RGB(0xD8, 0xDD, 0xE6) : RGB(0xE3, 0xE7, 0xEE));
+        draw_rounded_rect(dc, rc, 16, fill, border);
+        ui_text(dc, (HFONT)GetPropW(parent, sel ? L"fontSmallAA" : L"fontSmall"),
+                sel ? RGB(0xFF, 0xFF, 0xFF) : RGB(0x3A, 0x40, 0x48),
+                market_platform_label(pf), rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    } else if (id == IDC_ADD) {
+        // 主操作：橙色实心（对齐效果图里的「添加」）
+        bool pressed = (state & ODS_SELECTED) != 0;
+        COLORREF fill = pressed ? RGB(0xEF, 0x86, 0x0C) : RGB(0xF7, 0x93, 0x1A);
+        draw_rounded_rect(dc, rc, 16, fill, fill);
+        ui_text(dc, (HFONT)GetPropW(parent, L"fontNormalAA"), RGB(0xFF, 0xFF, 0xFF),
+                TR(L"btn.add"), rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    } else {
+        // 次操作：白底细边
+        bool pressed = (state & ODS_SELECTED) != 0;
+        COLORREF fill = pressed ? RGB(0xEE, 0xF0, 0xF3)
+                                : (hover ? RGB(0xF7, 0xF8, 0xFA) : RGB(0xFF, 0xFF, 0xFF));
+        draw_rounded_rect(dc, rc, 16, fill, RGB(0xE3, 0xE7, 0xEE));
+        ui_text(dc, (HFONT)GetPropW(parent, L"fontNormal"), RGB(0x3A, 0x40, 0x48),
+                TR(L"btn.del"), rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+}
+
+// 自绘按钮的 hover 上报。
+// 鼠标一旦落到子按钮上，父窗口就收不到 WM_MOUSEMOVE 了，
+// 所以父窗口那套命中检测永远算不到按钮，hover 会一直停在 NULL（关闭按钮不变色就是这个）。
+static LRESULT CALLBACK BtnSubclass(HWND h, UINT m, WPARAM w, LPARAM l) {
+    WNDPROC old = (WNDPROC)GetPropW(h, L"oldproc");
     switch (m) {
+    case WM_MOUSEMOVE:
+        if (!GetPropW(h, L"tracking")) {
+            TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, h, 0 };
+            TrackMouseEvent(&tme);
+            SetPropW(h, L"tracking", (HANDLE)1);
+        }
+        if (g_hoverBtn != h) {
+            HWND prev = g_hoverBtn; g_hoverBtn = h;
+            if (prev) InvalidateRect(prev, NULL, FALSE);
+            InvalidateRect(h, NULL, FALSE);
+        }
+        break;
+    case WM_MOUSELEAVE:
+        RemovePropW(h, L"tracking");
+        if (g_hoverBtn == h) { g_hoverBtn = NULL; InvalidateRect(h, NULL, FALSE); }
+        break;
+    case WM_SETCURSOR:
+        if (LOWORD(l) == HTCLIENT) { SetCursor(LoadCursor(NULL, IDC_HAND)); return TRUE; }
+        break;
+    case WM_NCDESTROY:
+        RemovePropW(h, L"tracking");
+        RemovePropW(h, L"oldproc");
+        SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)old);
+        break;
+    }
+    return CallWindowProcW(old, h, m, w, l);
+}
+
+static void hook_hover(HWND b) {
+    if (!b) return;
+    SetPropW(b, L"oldproc", (HANDLE)SetWindowLongPtrW(b, GWLP_WNDPROC, (LONG_PTR)BtnSubclass));
+}
+
+static LRESULT CALLBACK SettingsProc(HWND h, UINT m, WPARAM w, LPARAM l) {    switch (m) {
     case WM_CREATE:
         create_settings_controls(h);
         return 0;
@@ -2147,98 +2394,37 @@ static LRESULT CALLBACK SettingsProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         DRAWITEMSTRUCT* di = (DRAWITEMSTRUCT*)l;
         HDC dc = di->hDC;
         RECT rc = di->rcItem;
-        int id = di->CtlID;
-        bool hover = (g_hoverBtn == di->hwndItem);
-        SetBkMode(dc, TRANSPARENT);
+        const int id = di->CtlID;
+        const int cw = rc.right - rc.left, chh = rc.bottom - rc.top;
+        if (cw <= 0 || chh <= 0) return 0;
 
-        if (id == IDC_LIST) {
-            // 自绘列表项
-            if (di->itemID == (UINT)-1) return 0;
-            bool sel = (di->itemState & ODS_SELECTED) != 0;
-            HBRUSH b = CreateSolidBrush(sel ? RGB(0xFF, 0xEE, 0xD9) : RGB(0xFF, 0xFF, 0xFF));
-            FillRect(dc, &rc, b);
-            DeleteObject(b);
-            if (sel) {
-                RECT accent = { rc.left, rc.top + 4, rc.left + 3, rc.bottom - 4 };
-                HBRUSH ab = CreateSolidBrush(RGB(0xF7, 0x93, 0x1A));
-                FillRect(dc, &accent, ab);
-                DeleteObject(ab);
-            }
-            wchar_t buf[128] = { 0 };
-            SendMessageW(di->hwndItem, LB_GETTEXT, di->itemID, (LPARAM)buf);
-            HFONT f = (HFONT)GetPropW(h, L"fontNormal");
-            RECT tr = rc; tr.left += 12;
-            ui_text(dc, f, sel ? RGB(0xA0, 0x54, 0x0B) : RGB(0x1F, 0x23, 0x28),
-                    buf, tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        // 自绘控件统一先画到内存位图：
+        // 1) BS_OWNERDRAW 的 DC 底色是系统 COLOR_BTNFACE（浅灰），不重新铺底的话，
+        //    圆角以外的四个角就会露出一圈灰，看着"背景不干净"；
+        // 2) 抗锯齿的边缘像素要和正确底色混合，混到灰上会出脏边；
+        // 3) 顺带双缓冲，hover 重绘不闪。
+        HDC mem = CreateCompatibleDC(dc);
+        HBITMAP bmp = CreateCompatibleBitmap(dc, cw, chh);
+        if (!mem || !bmp) {
+            if (bmp) DeleteObject(bmp);
+            if (mem) DeleteDC(mem);
             return 0;
         }
+        HGDIOBJ oldBmp = SelectObject(mem, bmp);
+        RECT lr = { 0, 0, cw, chh };
+        HBRUSH wbg = CreateSolidBrush(RGB(0xFF, 0xFF, 0xFF));   // 自绘控件都落在白卡片上
+        FillRect(mem, &lr, wbg);
+        DeleteObject(wbg);
 
-        if (id == IDC_CLOSE) {
-            COLORREF bg = hover ? RGB(0xF2, 0xF3, 0xF5) : RGB(0xFF, 0xFF, 0xFF);
-            draw_rounded_rect(dc, rc, 8, bg, bg);
-            int cx = (rc.left + rc.right) / 2, cy = (rc.top + rc.bottom) / 2, s = 6;
-            HPEN pen = CreatePen(PS_SOLID, 2, hover ? RGB(0x1F, 0x23, 0x28) : RGB(0x6B, 0x72, 0x80));
-            HPEN op = (HPEN)SelectObject(dc, pen);
-            MoveToEx(dc, cx - s, cy - s, NULL); LineTo(dc, cx + s, cy + s);
-            MoveToEx(dc, cx + s, cy - s, NULL); LineTo(dc, cx - s, cy + s);
-            SelectObject(dc, op); DeleteObject(pen);
-        } else if (id == IDC_PIN_SW || id == IDC_THROUGH || id == IDC_TOPMOST || id == IDC_DOCK_SW) {
-            // 开关式控件
-            bool val = (id == IDC_PIN_SW) ? g_setPin
-                     : (id == IDC_THROUGH) ? g_setThrough
-                     : (id == IDC_DOCK_SW) ? g_setDock : g_setTop;
-            int rad = (rc.bottom - rc.top) / 2;
-            COLORREF on = RGB(0xF7, 0x93, 0x1A);
-            COLORREF off = RGB(0xCF, 0xD3, 0xDA);
-            // RoundRect 的第 5/6 个参数是圆角椭圆的直径，传 2 倍才是胶囊形
-            draw_rounded_rect(dc, rc, rad * 2, val ? on : off, val ? on : off);
-            int kx = val ? (rc.right - rad) : (rc.left + rad);
-            RECT knob = { kx - rad + 3, rc.top + 3, kx + rad - 3, rc.bottom - 3 };
-            HBRUSH kb = CreateSolidBrush(RGB(0xFF, 0xFF, 0xFF));
-            HPEN kp = CreatePen(PS_SOLID, 1, RGB(0xFF, 0xFF, 0xFF));
-            HGDIOBJ ob2 = SelectObject(dc, kb), op2 = SelectObject(dc, kp);
-            Ellipse(dc, knob.left, knob.top, knob.right, knob.bottom);
-            SelectObject(dc, ob2); SelectObject(dc, op2);
-            DeleteObject(kb); DeleteObject(kp);
-        } else if (id >= IDC_LANG_BASE && id < IDC_LANG_BASE + 8) {
-            // 语言胶囊：当前语言橙色实心，其余白底细边
-            int li = id - IDC_LANG_BASE;
-            if (li >= i18n::count()) return 0;
-            bool sel = (li == i18n::current());
-            bool pressed = (di->itemState & ODS_SELECTED) != 0;
-            COLORREF fill = sel ? (pressed ? RGB(0xEF, 0x86, 0x0C) : RGB(0xF7, 0x93, 0x1A))
-                                : (hover ? RGB(0xF3, 0xF5, 0xF9) : RGB(0xFF, 0xFF, 0xFF));
-            COLORREF border = sel ? fill : (hover ? RGB(0xD8, 0xDD, 0xE6) : RGB(0xE3, 0xE7, 0xEE));
-            RECT br = rc;
-            InflateRect(&br, -1, -1);
-            draw_rounded_rect(dc, br, 12, fill, border);
-            ui_text(dc, (HFONT)GetPropW(h, L"fontSmall"),
-                    sel ? RGB(0xFF, 0xFF, 0xFF) : RGB(0x3A, 0x40, 0x48),
-                    i18n::native_name(li), rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        } else if (id >= IDC_PF_BASE && id < IDC_PF_BASE + 8) {
-            // 数据源按钮：选中橙色实心，未选中白底 + 细边
-            int pf = id - IDC_PF_BASE;
-            bool sel = (pf == g_setPlatform);
-            bool pressed = (di->itemState & ODS_SELECTED) != 0;
-            COLORREF fill = sel ? (pressed ? RGB(0xEF, 0x86, 0x0C) : RGB(0xF7, 0x93, 0x1A))
-                                : (hover ? RGB(0xF3, 0xF5, 0xF9) : RGB(0xFF, 0xFF, 0xFF));
-            COLORREF border = sel ? fill : (hover ? RGB(0xD8, 0xDD, 0xE6) : RGB(0xE3, 0xE7, 0xEE));
-            draw_rounded_rect(dc, rc, 8, fill, border);
-            ui_text(dc, (HFONT)GetPropW(h, L"fontSmall"),
-                    sel ? RGB(0xFF, 0xFF, 0xFF) : RGB(0x3A, 0x40, 0x48),
-                    market_platform_label(pf), rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        } else {
-            // 小按钮（添加 / 删除）
-            bool pressed = (di->itemState & ODS_SELECTED) != 0;
-            COLORREF fill = hover ? RGB(0xE6, 0xE8, 0xED) : RGB(0xF1, 0xF2, 0xF5);
-            if (pressed) fill = RGB(0xDD, 0xE0, 0xE6);
-            draw_rounded_rect(dc, rc, 8, fill, RGB(0xE3, 0xE7, 0xEE));
-            const wchar_t* label = (id == IDC_ADD) ? TR(L"btn.add") : TR(L"btn.del");
-            ui_text(dc, (HFONT)GetPropW(h, L"fontNormal"), RGB(0x2B, 0x30, 0x36),
-                    label, rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        }
+        paint_ownerdraw(h, di->hwndItem, mem, lr, id, di->itemState, di->itemID);
+
+        BitBlt(dc, rc.left, rc.top, cw, chh, mem, 0, 0, SRCCOPY);
+        SelectObject(mem, oldBmp);
+        DeleteObject(bmp);
+        DeleteDC(mem);
         return 0;
     }
+
     case WM_MOUSEMOVE: {
         if (!g_trackMouse) {
             TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, h, 0 };
@@ -2309,6 +2495,10 @@ static LRESULT CALLBACK SettingsProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
     case WM_MOUSELEAVE: {
         g_trackMouse = false;
+        // 鼠标移进子按钮时父窗口也会收到 MOUSELEAVE，这时候不能把按钮自己刚设好的 hover 清掉
+        POINT cp; GetCursorPos(&cp);
+        HWND under = WindowFromPoint(cp);
+        if (under && GetParent(under) == h) return 0;
         if (g_hoverBtn) { InvalidateRect(g_hoverBtn, NULL, FALSE); g_hoverBtn = NULL; }
         return 0;
     }
@@ -2546,6 +2736,13 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE, LPSTR cmdLine, int) {
     InitCommonControls();
     SetProcessDPIAware();
 
+    // 圆角/圆形/斜线都要抗锯齿，GDI 做不到，统一交给 GDI+
+    {
+        Gdiplus::GdiplusStartupInput gsi;
+        if (Gdiplus::GdiplusStartup(&g_gdiplusToken, &gsi, NULL) != Gdiplus::Ok)
+            g_gdiplusToken = 0;
+    }
+
     InitializeCriticalSection(&g_cs);
     config_load(g_cfg, nullptr);
 
@@ -2627,6 +2824,10 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE, LPSTR cmdLine, int) {
     if (cmdLine && (strstr(cmdLine, "-settings") || strstr(cmdLine, "/settings"))) {
         open_settings();
         if (strstr(cmdLine, "-shot")) {
+            if (strstr(cmdLine, "-shothover")) {   // 调试用：把鼠标悬停态画进截图里
+                g_hoverBtn = GetDlgItem(g_hSettings, IDC_CLOSE);
+                InvalidateRect(g_hSettings, NULL, FALSE);
+            }
             pump_ms(900);   // 等窗口真正上屏并完成首帧绘制
             std::wstring p = exe_dir() + L"\\shot_settings.bmp";
             capture_window(g_hSettings, p.c_str());
@@ -2670,5 +2871,6 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE, LPSTR cmdLine, int) {
     Shell_NotifyIconW(NIM_DELETE, &g_nid);
     if (g_hIcon) DestroyIcon(g_hIcon);
     DeleteCriticalSection(&g_cs);
+    if (g_gdiplusToken) { Gdiplus::GdiplusShutdown(g_gdiplusToken); g_gdiplusToken = 0; }
     return 0;
 }

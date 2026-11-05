@@ -64,6 +64,8 @@ const Row kRows[] = {
     { L"set.coin_hint", { L"格式如 BTC-USDT",          L"格式如 BTC-USDT",             L"e.g. BTC-USDT" } },
     { L"btn.add",       { L"添加",                     L"新增",                        L"Add" } },
     { L"btn.del",       { L"删除",                     L"刪除",                        L"Delete" } },
+    { L"tag.spot",      { L"现货",                     L"現貨",                        L"Spot" } },
+    { L"tag.perp",      { L"永续",                     L"永續",                        L"Perp" } },
     { L"msg.keep_one",  { L"请至少保留一个关注币种",   L"請至少保留一個關注幣種",      L"Keep at least one coin" } },
     { L"msg.tip",       { L"提示",                     L"提示",                        L"Notice" } },
 

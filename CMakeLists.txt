@@ -22,7 +22,7 @@ add_executable(CryptoTray WIN32
     src/i18n.cpp
 )
 target_include_directories(CryptoTray PRIVATE src)
-target_link_libraries(CryptoTray PRIVATE winhttp comctl32 shell32 dwmapi uxtheme)
+target_link_libraries(CryptoTray PRIVATE winhttp comctl32 shell32 dwmapi uxtheme gdiplus)
 set_target_properties(CryptoTray PROPERTIES WIN32_EXECUTABLE TRUE)
 
 # 数据层冒烟测试（控制台）：验证 OKX 接口与解析
