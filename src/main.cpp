@@ -1383,6 +1383,10 @@ static void hint_show(bool locked, int x, int y, int w, int h) {
     g_hintRc = { x, y, x + w, y + h };
     if (!g_hHint || !IsWindow(g_hHint)) { g_hintOn = true; return; }
     if (same) return;
+    // 提示窗比横条建得早，默认被横条压着：只在「从隐藏变成显示」时抬一次 Z 序，
+    // 之后单纯挪位置。每次移动都 HWND_TOPMOST 会把置顶组反复顶到最前，
+    // 组里的汽水播控跟着重排，跟着一起闪
+    const bool raise = !g_hintOn || !IsWindowVisible(g_hHint);
     g_hintOn = true;
 
     // 尺寸变了才重设圆角区域：让四角真的被裁掉，不然会露出半透明黑角
@@ -1391,8 +1395,9 @@ static void hint_show(bool locked, int x, int y, int w, int h) {
         if (!SetWindowRgn(g_hHint, rgn, TRUE)) DeleteObject(rgn);
         g_hintW = w; g_hintH = h;
     }
-    SetWindowPos(g_hHint, HWND_TOPMOST, x, y, w, h,
-                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    UINT flags = SWP_NOACTIVATE | SWP_SHOWWINDOW;
+    if (!raise) flags |= SWP_NOZORDER;
+    SetWindowPos(g_hHint, raise ? HWND_TOPMOST : NULL, x, y, w, h, flags);
     InvalidateRect(g_hHint, NULL, FALSE);
     UpdateWindow(g_hHint);
 }
@@ -1655,8 +1660,11 @@ static void drag_update(HWND h) {
 
     // 鼠标按在窗口里的哪一点：落点按这个点对位（而不是窗口中心），拖起来才跟手
     int grabX0 = g_dragStart.x - g_dragRect.left;
+    int grabY0 = g_dragStart.y - g_dragRect.top;
     if (grabX0 < 0) grabX0 = 0;
+    if (grabY0 < 0) grabY0 = 0;
     if (W > 0 && grabX0 > W - 1) grabX0 = W - 1;
+    if (H > 0 && grabY0 > H - 1) grabY0 = H - 1;
 
     // 拖动中窗口跟着光标走：只夹在整块显示器内（允许压到任务栏上）。
     // 之前夹在工作区，窗口底边永远到不了任务栏，两态就只能靠光标猜
@@ -1683,16 +1691,45 @@ static void drag_update(HWND h) {
         g_dragAlong = false;
     }
 
+    // 从横条拖起时：拖动期间只动虚框，真横条原地不动，松手才一次性落位。
+    // 横条本体在拖动中反复搬家，会连带挤动邻居控件（汽水播控那些）跟着重排，
+    // 看着就是拖一下就闪一下；而虚框本来就把落点说清楚了，横条没必要跟着爬
+    const bool ghost = g_dragDock;
+
     if (hasBar && g_dragAlong) {
-        // 沿任务栏拖动：水平位置按「磁性吸附」算（吸附点都避开邻居），竖直锁在栏里。
+        // 沿任务栏拖：虚框按「磁性吸附」算水平位置（吸附点都避开邻居），竖直锁在栏里。
         // 期望位置 = 光标按住的那一点，所以空档里就是跟手；靠近最左/最右/邻居时吸上去，
         // 吸住以后要拉出 SNAP_HOLD 才换位置 —— 这就是「拖到最右贴最右，往左拖一段才动」
-        const int trayH = tr.bottom - tr.top;
-        ny = tr.top + (trayH - H) / 2;
-        LONG lo = 0, hi = 0;
-        taskbar_free_span(lo, hi);
-        nx = dock_target_x(W, pt.x - grabX0, lo, hi);
-        hint_hide();          // 横条自己就在落点上，再画个框只会叠一层
+        // 鼠标消息和 16ms 轮询会双触发，所以虚框也节流到 ~20ms 一次，不跟着双倍刷新
+        const DWORD now = GetTickCount();
+        if (now - g_dragHintTick >= 20) {
+            g_dragHintTick = now;
+            const int trayH = tr.bottom - tr.top;
+            const int hw = dock_w(), hh = dock_h();
+            LONG lo = 0, hi = 0;
+            taskbar_free_span(lo, hi);
+            // 抓取点按虚框宽度换算：竖排浮窗和横条宽度差得多，直接用会偏出去
+            const int gx = (W > 0) ? grabX0 * hw / W : hw / 2;
+            const int hx = dock_target_x(hw, pt.x - gx, lo, hi);
+            hint_show(true, hx, tr.top + (trayH - hh) / 2, hw, hh);  // 亮着的框 = 松手停在这
+        }
+    } else if (ghost) {
+        // 横条被抬离任务栏：虚框换成浮窗形态跟手，横条本体仍然留在原地
+        const DWORD now = GetTickCount();
+        if (now - g_dragHintTick >= 20) {
+            g_dragHintTick = now;
+            int fw = g_cfg.popupWidth;
+            if (fw < POPUP_W_MIN) fw = POPUP_W_MIN;
+            if (fw > POPUP_W_MAX) fw = POPUP_W_MAX;
+            const int fh = popup_height((int)g_cfg.coins.size());
+            int fx = pt.x - ((W > 0) ? grabX0 * fw / W : fw / 2);
+            int fy = pt.y - ((H > 0) ? grabY0 * fh / H : fh / 2);
+            if (fx < mr.left) fx = mr.left;
+            if (fy < mr.top) fy = mr.top;
+            if (fx + fw > mr.right) fx = mr.right - fw;
+            if (fy + fh > mr.bottom) fy = mr.bottom - fh;
+            hint_show(false, fx, fy, fw, fh);
+        }
     } else if (hasBar) {
         // 从浮窗拖向任务栏：算落点框。目标位置要查邻居（EnumWindows），
         // 节流到 ~60ms 一次；hint_show 内部还会跳过没有变化的重绘
@@ -1728,17 +1765,20 @@ static void drag_update(HWND h) {
 
     // 位置没变就不要 SetWindowPos：WM_MOUSEMOVE 和 16ms 轮询会双触发，
     // 一次移动变成两次搬家。另外这里用 SWP_NOZORDER —— 每帧 HWND_TOPMOST 都会把
-    // 横条提到置顶组最前面，置顶组里的汽水播控于是被反复重组、重绘，跟着一起闪
-    RECT cr0;
-    const bool moved = !GetWindowRect(h, &cr0) || cr0.left != nx || cr0.top != ny;
-    if (moved) {
-        // 一次移动超过 40px 说明是「跳点」（吸附换了落点），邻居多半会跟着收缩 / 挪位。
-        // 立刻作废占位缓存，下一帧按它的新位置重算；不这样的话会按旧位置把横条多推出去一截
-        int jump = cr0.left - nx;
-        if (jump < 0) jump = -jump;
-        if (jump > 40 && GetTickCount() - g_occTick > 100) g_occValid = false;
-        SetWindowPos(h, NULL, nx, ny, 0, 0,
-                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    // 横条提到置顶组最前面，置顶组里的汽水播控于是被反复重组、重绘，跟着一起闪。
+    // 从横条拖起时（ghost）整个拖动过程都不碰窗口位置，只在松手时落位
+    if (!ghost) {
+        RECT cr0;
+        const bool moved = !GetWindowRect(h, &cr0) || cr0.left != nx || cr0.top != ny;
+        if (moved) {
+            // 一次移动超过 40px 说明是「跳点」（吸附换了落点），邻居多半会跟着收缩 / 挪位。
+            // 立刻作废占位缓存，下一帧按它的新位置重算；不这样的话会按旧位置把横条多推出去一截
+            int jump = cr0.left - nx;
+            if (jump < 0) jump = -jump;
+            if (jump > 40 && GetTickCount() - g_occTick > 100) g_occValid = false;
+            SetWindowPos(h, NULL, nx, ny, 0, 0,
+                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
     }
 }
 
@@ -1780,19 +1820,19 @@ static void drag_finish(HWND h) {
         g_setDock = true;
         RECT tr, mon;
         if (taskbar_rect(tr, mon)) {
-            // 横条此刻已经在最终落点上：沿栏拖是被吸附过去的，从浮窗拖是跟着落点框，
-            // 所以记它现在的位置就是记落点（不再重算一遍，免得和眼睛看到的不一致）
+            // 落点就是落点框的位置：从横条拖起时窗口全程没动过，只能信框；
+            // 从浮窗拖过来时窗口跟手，框也在同一处，两者一致
             int off = (int)(hr.left - tr.left);
             g_cfg.dockOffsetX = off < 0 ? 0 : off;
             g_dockPlaced = false;      // 位置是新的：下一次落位按配置来，不要沿用旧矩形
         }
     } else {
-        // 没对准任务栏：按当前位置落回浮窗（也覆盖「从横条拖出去」的情况）
-        RECT r; GetWindowRect(h, &r);
+        // 没对准任务栏：落到落点框的位置（ghost 模式下窗口根本没动过，
+        // 不能再读它当前的矩形，否则会把它留在原地、白拖一场）
         g_cfg.dockTaskbar = false;
         g_setDock = false;
-        g_cfg.windowX = r.left;
-        g_cfg.windowY = r.top;
+        g_cfg.windowX = hr.left;
+        g_cfg.windowY = hr.top;
     }
     apply_popup_layers();       // 横条无条件置顶 / 浮窗按「置于最顶层」开关
     enable_dwm_effects(g_hWnd); // 横条去系统投影，竖排恢复
