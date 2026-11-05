@@ -18,6 +18,7 @@ struct Config {
     bool mouseThrough = false;   // 鼠标穿透：点击直接落到下层窗口
     bool dockTaskbar = false;    // 停靠任务栏：弹窗变成嵌在任务栏内部的迷你横条
     int dockOffsetX = -1;        // 横条在任务栏内的水平偏移（-1 表示未记录，用默认位置）
+    int dockOffsetY = -1;        // 竖排任务栏（左/右）时沿垂直方向的偏移
     int popupWidth = 300;        // 弹窗宽度（像素，260-460，默认紧凑）
     int windowX = -1, windowY = -1; // 弹窗位置（-1 表示未记录，使用默认右下角）
     std::string klineBar = "1m"; // 走势图 K 线周期：5m/15m/1H/4H/1D/1W/1M/3M

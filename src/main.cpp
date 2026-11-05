@@ -544,6 +544,26 @@ static bool taskbar_rect(RECT& tr, RECT& mon) {
     return true;
 }
 
+// 任务栏方向。以前只认横排任务栏，竖排时会直接掉进「贴外侧」的兜底分支、
+// 拖动完全不响应；现在按方向统一处理：横排嵌入栏内，竖排塞不下就贴内侧滑
+enum TbDir { TBR_NONE, TBR_BOTTOM, TBR_TOP, TBR_LEFT, TBR_RIGHT };
+
+static TbDir tb_dir_of(const RECT& tr, const RECT& mon) {
+    const int w = tr.right - tr.left, h = tr.bottom - tr.top;
+    if (w <= 4 || h <= 4) return TBR_NONE;
+    if (w > h) return (tr.top <= mon.top + 2) ? TBR_TOP : TBR_BOTTOM;
+    return (tr.left <= mon.left + 2) ? TBR_LEFT : TBR_RIGHT;
+}
+static bool tb_horiz(TbDir d) { return d == TBR_BOTTOM || d == TBR_TOP; }
+
+static TbDir tb_dir_now(RECT* outTr = nullptr, RECT* outMon = nullptr) {
+    RECT tr, mon;
+    if (!taskbar_rect(tr, mon)) return TBR_NONE;
+    if (outTr)  *outTr = tr;
+    if (outMon) *outMon = mon;
+    return tb_dir_of(tr, mon);
+}
+
 // 横条高度：比任务栏略矮，嵌进去才像任务栏自带的控件；随 DPI / 任务栏高度自适应
 static int dock_h() {
     RECT tr, mon;
@@ -559,17 +579,24 @@ static int dock_h() {
     return 36;
 }
 
-// 弹窗宽度：内嵌任务栏时用横条宽度，否则跟随配置（越窄越紧凑）
-static int popup_w() {
-    if (g_cfg.dockTaskbar) return dock_w();
+static int popup_height(int rows) {
+    if (rows < 1) rows = 1;
+    return 12 + rows * (POPUP_ROW_H + 4) + 4;
+}
+
+// 大窗口（浮窗形态）的尺寸：拖动时算落点框要用，与当前是不是停靠无关
+static int float_w() {
     int w = g_cfg.popupWidth;
     if (w < POPUP_W_MIN) w = POPUP_W_MIN;
     if (w > POPUP_W_MAX) w = POPUP_W_MAX;
     return w;
 }
-static int popup_height(int rows) {
-    if (rows < 1) rows = 1;
-    return 12 + rows * (POPUP_ROW_H + 4) + 4;
+static int float_h() { return popup_height((int)g_cfg.coins.size()); }
+
+// 弹窗宽度：内嵌任务栏时用横条宽度，否则跟随配置（越窄越紧凑）
+static int popup_w() {
+    if (g_cfg.dockTaskbar) return dock_w();
+    return float_w();
 }
 
 // 弹窗高度：统一入口（横条 / 竖排列表）
@@ -591,18 +618,24 @@ static bool taskbar_revealed() {
     return true;
 }
 
-// 量出任务栏上的空白带：左边是开始按钮 / 任务按钮区的右边界，右边是托盘区的左边界
+// 量出任务栏上的空白带（沿任务栏主轴）：一端是开始按钮 / 任务按钮区，
+// 另一端是托盘区。横排时是 x 区间，竖排时是 y 区间
 static bool taskbar_free_span(LONG& lo, LONG& hi) {
+    RECT tr, mon;
+    if (!taskbar_rect(tr, mon)) return false;
+    TbDir dir = tb_dir_of(tr, mon);
+    if (dir == TBR_NONE) return false;
     HWND tb = FindWindowW(L"Shell_TrayWnd", NULL);
     if (!tb) return false;
-    RECT tr; GetWindowRect(tb, &tr);
-    lo = tr.left;
-    hi = tr.right;
+    const bool horiz = tb_horiz(dir);
+    if (horiz) { lo = tr.left; hi = tr.right; }
+    else       { lo = tr.top;  hi = tr.bottom; }
 
     HWND tray = FindWindowExW(tb, NULL, L"TrayNotifyWnd", NULL);
     if (tray) {
         RECT r; GetWindowRect(tray, &r);
-        if (r.left > lo) hi = r.left;
+        if (horiz) { if (r.left > lo)   hi = r.left; }      // 托盘在右端
+        else       { if (r.top  > lo)   hi = r.top;  }      // 竖排时托盘在下端
     }
 
     const wchar_t* probes[] = { L"Start", L"ReBarWindow32", L"MSTaskSwWClass" };
@@ -610,7 +643,11 @@ static bool taskbar_free_span(LONG& lo, LONG& hi) {
         HWND c = FindWindowExW(tb, NULL, cls, NULL);
         if (!c) continue;
         RECT r; GetWindowRect(c, &r);
-        if ((r.right - r.left) > 4 && r.right > lo) lo = r.right;   // 已被占用的右边界
+        if (horiz) {
+            if ((r.right - r.left) > 4 && r.right > lo) lo = r.right;   // 已被占用的右边界
+        } else {
+            if ((r.bottom - r.top) > 4 && r.bottom > lo) lo = r.bottom; // 竖排：下边界
+        }
     }
     return hi > lo + 40;
 }
@@ -633,13 +670,15 @@ static const int SNAP_HOLD = 56;        // 吸住后的脱离阈值（滞回，�
 
 static DWORD g_occTick = 0;
 static bool  g_occValid = false;
+static bool  g_occHoriz = true;         // 这一轮占位是按哪个方向量的
 static RECT  g_occ[DOCK_OCC_MAX];
 static int   g_occN = 0;
 
 // 只认「基本躺在任务栏里」的窗口：通知中心、托盘右键菜单、Toast 都会往上探出一大截，
-// 那些是临时弹出物，不该被当成邻居去躲
+// 那些是临时弹出物，不该被当成邻居去躲。
+// 横排任务栏看高度、竖排看宽度；「压到栏里」的比例按交叉轴算
 static BOOL CALLBACK occ_enum_proc(HWND h, LPARAM lp) {
-    struct Ctx { RECT tr; RECT* out; int n; int cap; }* c = (Ctx*)lp;
+    struct Ctx { RECT tr; RECT* out; int n; int cap; bool horiz; }* c = (Ctx*)lp;
     if (!IsWindowVisible(h) || IsIconic(h)) return TRUE;
 
     DWORD pid = 0;
@@ -660,17 +699,22 @@ static BOOL CALLBACK occ_enum_proc(HWND h, LPARAM lp) {
     RECT r;
     if (!GetWindowRect(h, &r)) return TRUE;
 
-    const LONG trayH = c->tr.bottom - c->tr.top;
-    const LONG hgt = r.bottom - r.top;
-    if (hgt <= 0 || hgt > trayH + 16) return TRUE;      // 比任务栏高得多：不是同类控件
+    const bool horiz = c->horiz;
+    const LONG trayCross = horiz ? (c->tr.bottom - c->tr.top) : (c->tr.right - c->tr.left);
+    const LONG cross = horiz ? (r.bottom - r.top) : (r.right - r.left);
+    if (cross <= 0 || cross > trayCross + 16) return TRUE;   // 比任务栏厚得多：不是同类控件
 
-    const LONG top = (r.top > c->tr.top) ? r.top : c->tr.top;
-    const LONG bot = (r.bottom < c->tr.bottom) ? r.bottom : c->tr.bottom;
-    if (bot - top < hgt * 3 / 4) return TRUE;           // 只在任务栏边缘蹭到一点点
+    const LONG ca = horiz ? (r.top > c->tr.top ? r.top : c->tr.top)
+                          : (r.left > c->tr.left ? r.left : c->tr.left);
+    const LONG cb = horiz ? (r.bottom < c->tr.bottom ? r.bottom : c->tr.bottom)
+                          : (r.right < c->tr.right ? r.right : c->tr.right);
+    if (cb - ca < cross * 3 / 4) return TRUE;          // 只在任务栏边缘蹭到一点点
 
-    const LONG lo = (r.left > c->tr.left) ? r.left : c->tr.left;
-    const LONG hi = (r.right < c->tr.right) ? r.right : c->tr.right;
-    if (hi - lo < 8) return TRUE;
+    const LONG la = horiz ? (r.left > c->tr.left ? r.left : c->tr.left)
+                          : (r.top > c->tr.top ? r.top : c->tr.top);
+    const LONG lb = horiz ? (r.right < c->tr.right ? r.right : c->tr.right)
+                          : (r.bottom < c->tr.bottom ? r.bottom : c->tr.bottom);
+    if (lb - la < 8) return TRUE;
 
     if (c->n < c->cap) { c->out[c->n] = r; c->n++; }
     return TRUE;
@@ -685,7 +729,10 @@ static int occ_cached(RECT* out, int cap) {
         RECT tr, mon;
         g_occN = 0;
         if (taskbar_rect(tr, mon)) {
-            struct Ctx { RECT tr; RECT* out; int n; int cap; } c = { tr, g_occ, 0, DOCK_OCC_MAX };
+            const TbDir d = tb_dir_of(tr, mon);
+            g_occHoriz = tb_horiz(d);
+            struct Ctx { RECT tr; RECT* out; int n; int cap; bool horiz; }
+                c = { tr, g_occ, 0, DOCK_OCC_MAX, g_occHoriz };
             EnumWindows(occ_enum_proc, (LPARAM)&c);
             g_occN = c.n;
         }
@@ -695,13 +742,13 @@ static int occ_cached(RECT* out, int cap) {
     return n;
 }
 
-// 该位置会不会压到邻居（左右各留 DOCK_GAP）
+// 该位置会不会压到邻居（两侧各留 DOCK_GAP）。x 是沿任务栏主轴的坐标
 static bool dock_overlaps(int x, int W) {
     RECT occ[DOCK_OCC_MAX];
     const int n = occ_cached(occ, DOCK_OCC_MAX);
     for (int i = 0; i < n; i++) {
-        const int oa = (int)occ[i].left - DOCK_GAP;
-        const int ob = (int)occ[i].right + DOCK_GAP;
+        const int oa = (int)(g_occHoriz ? occ[i].left  : occ[i].top)  - DOCK_GAP;
+        const int ob = (int)(g_occHoriz ? occ[i].right : occ[i].bottom) + DOCK_GAP;
         if (x + W > oa && x < ob) return true;
     }
     return false;
@@ -724,8 +771,8 @@ static int dock_free_x(int W, int wantX, LONG lo, LONG hi) {
     for (int pass = 0; pass < 3; pass++) {
         bool hit = false;
         for (int i = 0; i < n; i++) {
-            const int oa = (int)occ[i].left - DOCK_GAP;
-            const int ob = (int)occ[i].right + DOCK_GAP;
+            const int oa = (int)(g_occHoriz ? occ[i].left  : occ[i].top)    - DOCK_GAP;
+            const int ob = (int)(g_occHoriz ? occ[i].right : occ[i].bottom) + DOCK_GAP;
             if (x + W <= oa || x >= ob) continue;              // 没相交
             if (x + W / 2 < (oa + ob) / 2) {
                 if (x + W > oa) { x = oa - W; hit = true; }    // 推向邻居左侧
@@ -772,8 +819,10 @@ static int dock_target_x(int W, int wantX, LONG lo, LONG hi) {
     cand[nc++] = xn;
     cand[nc++] = maxX;
     for (int i = 0; i < n; i++) {
-        const int a = (int)occ[i].left - W - DOCK_GAP;      // 邻居左侧
-        const int b = (int)occ[i].right + DOCK_GAP;         // 邻居右侧
+        const int ol = (int)(g_occHoriz ? occ[i].left : occ[i].top);       // 邻居前沿
+        const int orr = (int)(g_occHoriz ? occ[i].right : occ[i].bottom);   // 邻居后沿
+        const int a = ol - W - DOCK_GAP;      // 邻居前侧
+        const int b = orr + DOCK_GAP;         // 邻居后侧
         if (a >= xn && a <= maxX) cand[nc++] = a;
         if (b >= xn && b <= maxX) cand[nc++] = b;
     }
@@ -796,45 +845,53 @@ static int dock_target_x(int W, int wantX, LONG lo, LONG hi) {
     return dock_free_x(W, wantX, lo, hi);
 }
 
-// 内嵌任务栏：横条落在任务栏内部（覆盖在任务栏之上的同层窗口），竖直居中
+// 停靠任务栏。横排任务栏里横条直接嵌进栏内（竖直居中）；竖排任务栏厚度不够，
+// 横条塞不进去，就贴在内侧沿主轴滑动。两种情形共用同一套「沿主轴避让邻居」的逻辑
 static bool g_dockPlaced = false;      // 已经落过一次位，之后才允许「位置合法就别动」
 static bool dock_place(int W, int H, int& x, int& y) {
     RECT tr, mon;
     if (!taskbar_rect(tr, mon)) return false;
 
+    const TbDir dir = tb_dir_of(tr, mon);
+    if (dir == TBR_NONE) return false;
+    const bool horiz = tb_horiz(dir);
     const int trayH = tr.bottom - tr.top;
     const int trayW = tr.right - tr.left;
-    if (trayH <= 4 || trayW <= 4) return false;
 
-    if (trayH > trayW) {
-        // 竖排任务栏塞不下横向条，退回贴在任务栏外侧
-        x = (tr.left <= mon.left + 2) ? (tr.right + 4) : (tr.left - W - 4);
-        y = (tr.top + tr.bottom - H) / 2;
-        return true;
+    LONG lo = 0, hi = 0;
+    if (!taskbar_free_span(lo, hi)) { lo = horiz ? tr.left : tr.top;
+                                      hi = horiz ? tr.right : tr.bottom; }
+
+    // 交叉轴上的位置：横排放进栏里居中；竖排贴在任务栏内侧（工作区那一侧）
+    if (horiz) {
+        y = tr.top + (trayH - H) / 2;
+    } else {
+        x = (dir == TBR_LEFT) ? (tr.right + 4) : (tr.left - W - 4);
     }
 
-    // 水平任务栏：垂直方向居中，水平方向找任务栏上没被图标占用的空档
-    y = tr.top + (trayH - H) / 2;
-
-    LONG lo = tr.left, hi = tr.right;
-    taskbar_free_span(lo, hi);
+    // 沿主轴的尺寸与坐标：横排看 x/W，竖排看 y/H
+    const int axisSize = horiz ? W : H;
+    const int axisBase = horiz ? (int)tr.left : (int)tr.top;
 
     // 位置来自配置（用户拖到哪就记哪），落位时再由「避开邻居」兜一层：
-    // 空档里就原样，撞上邻居就贴到它边上，明确要贴最右则直接把邻居挤开
-    int off = g_cfg.dockOffsetX;
-    if (off < 0) off = (int)(hi - tr.left) - W;       // 从没记录过：靠右
-    const int wantX = (int)tr.left + off;
+    // 空档里就原样，撞上邻居就贴到它边上，明确要贴尽头则直接把邻居挤开
+    int off = horiz ? g_cfg.dockOffsetX : g_cfg.dockOffsetY;
+    if (off < 0) off = (int)(hi - axisBase) - axisSize;   // 从没记录过：靠后
+    const int wantA = axisBase + off;
 
     // 现在的位置只要还合法（在可用带里、没压到邻居）就别动。
     // 这条刷新每秒都跑，邻居又常在做自适应动画，每次都重算会让横条跟着一起抖
     RECT cur;
-    if (g_dockPlaced && g_hWnd && IsWindow(g_hWnd) && GetWindowRect(g_hWnd, &cur) &&
-        cur.left >= (int)lo && cur.left + W <= (int)hi && !dock_overlaps((int)cur.left, W)) {
-        x = (int)cur.left;
-        return true;
+    if (g_dockPlaced && g_hWnd && IsWindow(g_hWnd) && GetWindowRect(g_hWnd, &cur)) {
+        const int curA = horiz ? (int)cur.left : (int)cur.top;
+        if (curA >= (int)lo && curA + axisSize <= (int)hi && !dock_overlaps(curA, axisSize)) {
+            if (horiz) x = (int)cur.left; else y = (int)cur.top;
+            return true;
+        }
     }
     g_dockPlaced = true;
-    x = dock_free_x(W, wantX, lo, hi);
+    const int a = dock_free_x(axisSize, wantA, lo, hi);
+    if (horiz) x = a; else y = a;
     return true;
 }
 
@@ -1670,8 +1727,11 @@ static void drag_update(HWND h) {
 
     // 鼠标按在窗口里的哪一点：落点按这个点对位（而不是窗口中心），拖起来才跟手
     int grabX0 = g_dragStart.x - g_dragRect.left;
+    int grabY0 = g_dragStart.y - g_dragRect.top;
     if (grabX0 < 0) grabX0 = 0;
+    if (grabY0 < 0) grabY0 = 0;
     if (W > 0 && grabX0 > W - 1) grabX0 = W - 1;
+    if (H > 0 && grabY0 > H - 1) grabY0 = H - 1;
 
     // 拖动中窗口跟着光标走：只夹在整块显示器内（允许压到任务栏上）。
     // 之前夹在工作区，窗口底边永远到不了任务栏，两态就只能靠光标猜
@@ -1685,38 +1745,72 @@ static void drag_update(HWND h) {
     if (ny + H > mr.bottom) ny = mr.bottom - H;
 
     RECT tr, mon;
-    const bool hasBar = taskbar_rect(tr, mon) && (tr.right - tr.left) > (tr.bottom - tr.top);
+    const TbDir dir = tb_dir_now(&tr, &mon);
+    const bool hasBar = (dir != TBR_NONE);
+    const bool horiz = tb_horiz(dir);
+    const int trayH = tr.bottom - tr.top;
 
-    // 「沿任务栏拖」用锁存，而不是每帧看光标在不在任务栏里：
-    // 手拖时纵向总会抖几像素，条件一翻转落点框就跟着出现/消失，看着就是闪。
-    // 一旦认定在沿栏拖，只有光标抬离任务栏超过一个任务栏高才回到「拖出去」模式
+    // 光标到任务栏「内侧边」的距离：正数表示还压在栏上，负数表示已经离开。
+    // 拖出 / 拖回的判定都用它，两个方向共用一套阈值，行为才镜像对称
+    int gap = 0;
+    if (hasBar) {
+        switch (dir) {
+        case TBR_BOTTOM: gap = pt.y - tr.top;    break;   // 光标在栏顶以下
+        case TBR_TOP:    gap = tr.bottom - pt.y; break;
+        case TBR_LEFT:   gap = tr.right - pt.x;  break;   // 竖排：从内边往里算
+        default:        gap = pt.x - tr.left;   break;
+        }
+    }
+    const bool barOnTop = (dir == TBR_TOP);
+
+    // 横条在「交叉轴」上的坐标：横排任务栏嵌进栏内居中；竖排任务栏厚度不够，
+    // 塞不进去就贴在内侧（工作区那一侧），沿主轴滑动
+    auto cross_pos = [&](int crossSize) -> int {
+        if (horiz) return tr.top + (trayH - crossSize) / 2;
+        return (dir == TBR_LEFT) ? (tr.right + 4) : (tr.left - crossSize - 4);
+    };
+
+    // 「还贴在任务栏上」用锁存 + 双阈值：进到 4px 内算回到栏上，离开 28px 才算拖出去。
+    // 原来是「抬离 1.5 个任务栏高」，得往上拽 70 多像素才切换，中间那一段一直是横条状态，
+    // 看着就是「拖了半天还没变大窗口」。单阈值又会因为手抖几像素来回翻，所以留了滞回
     if (hasBar && g_dragDock) {
-        const int trayH = tr.bottom - tr.top;
-        if (pt.y > tr.top - trayH)          g_dragAlong = true;
-        if (pt.y < tr.top - trayH * 3 / 2)  g_dragAlong = false;
+        if (gap <= 4)  g_dragAlong = true;
+        if (gap > 28)  g_dragAlong = false;
     } else {
         g_dragAlong = false;
     }
 
     if (hasBar && g_dragAlong) {
-        // 沿任务栏拖动：横条按「磁性吸附」直接被吸着走（吸附点都避开邻居），竖直锁在栏里。
-        // 期望位置 = 光标按住的那一点，所以空档里就是跟手；靠近最左/最右/邻居时吸上去，
+        // 沿任务栏拖动：横条按「磁性吸附」直接被吸着走（吸附点都避开邻居），交叉轴锁住。
+        // 期望位置 = 光标按住的那一点，所以空档里就是跟手；靠近两端/邻居时吸上去，
         // 吸住以后要拉出 SNAP_HOLD 才换位置 —— 这就是「拖到最右贴最右，往左拖一段才动」。
         // 这时横条自己就在落点上，不再画落点框（叠一层只会把它盖住）
-        const int trayH = tr.bottom - tr.top;
-        ny = tr.top + (trayH - H) / 2;
         LONG lo = 0, hi = 0;
         taskbar_free_span(lo, hi);
-        nx = dock_target_x(W, pt.x - grabX0, lo, hi);
+        if (horiz) {
+            ny = cross_pos(H);
+            nx = dock_target_x(W, pt.x - grabX0, lo, hi);
+        } else {
+            nx = cross_pos(W);
+            ny = dock_target_x(H, pt.y - grabY0, lo, hi);
+        }
         hint_hide();
+    } else if (hasBar && g_dragDock) {
+        // 横条离开任务栏：本体继续跟着光标，落点框改成「大窗口」的尺寸 ——
+        // 和「大窗口拖向任务栏」完全对称，只是方向反过来。松手按框落成大窗口
+        const int fw = float_w(), fh = float_h();
+        int fx = pt.x - ((W > 0) ? grabX0 * fw / W : fw / 2);
+        int fy = pt.y - ((H > 0) ? grabY0 * fh / H : fh / 2);
+        if (fx < mr.left) fx = mr.left;
+        if (fy < mr.top) fy = mr.top;
+        if (fx + fw > mr.right) fx = mr.right - fw;
+        if (fy + fh > mr.bottom) fy = mr.bottom - fh;
+        hint_show(false, fx, fy, fw, fh);
     } else if (hasBar) {
-        // 从浮窗拖向任务栏：算落点框。目标位置要查邻居（EnumWindows），
-        // 节流到 ~60ms 一次；hint_show 内部还会跳过没有变化的重绘
-        const int trayH = tr.bottom - tr.top;
-        const bool barOnTop = (tr.top <= mon.top + 2);          // 任务栏吸顶的情况
-        const int gap = barOnTop ? (ny - tr.bottom)             // 窗口顶边到任务栏底边
-                                 : (tr.top - (ny + H));         // 窗口底边到任务栏顶边
-        if (gap <= 96) {                                        // gap > 96px 不提示
+        // 从大窗口拖向任务栏：算落点框。目标位置要查邻居（EnumWindows），
+        // 节流到 ~60ms 一次；hint_show 内部还会跳过没有变化的重绘。
+        // 触发距离从 96px 放到 160px：一路拖到任务栏跟前才出框，中间那段是空的
+        if (gap <= 160) {
             const DWORD now = GetTickCount();
             if (now - g_dragHintTick >= 60) {
                 g_dragHintTick = now;
@@ -1724,15 +1818,21 @@ static void drag_update(HWND h) {
                 LONG lo = 0, hi = 0;
                 taskbar_free_span(lo, hi);
                 // 落点框画在真正的落点上（同样走磁性吸附），松手就落在这里。
-                // 抓取点按落点宽度换算：竖排浮窗和横条宽度差得多，直接用会偏出去
-                const int gx = (W > 0) ? grabX0 * hw / W : hw / 2;
-                const int hx = dock_target_x(hw, pt.x - gx, lo, hi);
-                const int hy = tr.top + (trayH - hh) / 2;
-
+                // 抓取点按落点尺寸换算：竖排浮窗和横条宽度差得多，直接用会偏出去
+                int hx = 0, hy = 0, gapBox = 0;
+                if (horiz) {
+                    const int gx = (W > 0) ? grabX0 * hw / W : hw / 2;
+                    hx = dock_target_x(hw, pt.x - gx, lo, hi);
+                    hy = cross_pos(hh);
+                    gapBox = barOnTop ? (ny - (hy + hh)) : (hy - (ny + H));
+                } else {
+                    const int gy = (H > 0) ? grabY0 * hh / H : hh / 2;
+                    hy = dock_target_x(hh, pt.y - gy, lo, hi);
+                    hx = cross_pos(hw);
+                    gapBox = (dir == TBR_LEFT) ? (hx - (nx + W)) : (nx - (hx + hw));
+                }
                 // 窗口边缘贴住虚线框（差 8px 内）→ 松手即固定
-                const int gapBox = barOnTop ? (ny - (hy + hh)) : (hy - (ny + H));
-                const bool locked = (gapBox <= 8) ||
-                                    (barOnTop ? (pt.y <= tr.bottom) : (pt.y >= tr.top));
+                const bool locked = (gapBox <= 8) || (gap <= 4);
                 hint_show(locked, hx, hy, hw, hh);
             }
         } else {
@@ -1796,10 +1896,17 @@ static void drag_finish(HWND h) {
         g_setDock = true;
         RECT tr, mon;
         if (taskbar_rect(tr, mon)) {
-            // 落点就是落点框的位置：从横条拖起时窗口全程没动过，只能信框；
-            // 从浮窗拖过来时窗口跟手，框也在同一处，两者一致
-            int off = (int)(hr.left - tr.left);
-            g_cfg.dockOffsetX = off < 0 ? 0 : off;
+            // 落点就是落点框的位置：从横条拖起时窗口全程跟手，只能信框；
+            // 从大窗口拖过来时窗口跟手，框也在同一处，两者一致。
+            // 横排任务栏记 x 偏移，竖排记 y 偏移
+            const TbDir d = tb_dir_of(tr, mon);
+            if (tb_horiz(d)) {
+                int off = (int)(hr.left - tr.left);
+                g_cfg.dockOffsetX = off < 0 ? 0 : off;
+            } else {
+                int off = (int)(hr.top - tr.top);
+                g_cfg.dockOffsetY = off < 0 ? 0 : off;
+            }
             g_dockPlaced = false;      // 位置是新的：下一次落位按配置来，不要沿用旧矩形
         }
     } else {

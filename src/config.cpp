@@ -55,6 +55,7 @@ bool config_load(Config& c, std::string* err) {
         else if (k == "mouse_through") c.mouseThrough = (atoi(v.c_str()) != 0);
         else if (k == "dock_taskbar") c.dockTaskbar = (atoi(v.c_str()) != 0);
         else if (k == "dock_offset_x") c.dockOffsetX = atoi(v.c_str());
+        else if (k == "dock_offset_y") c.dockOffsetY = atoi(v.c_str());
         else if (k == "popup_width") c.popupWidth = atoi(v.c_str());
         else if (k == "window_x") c.windowX = atoi(v.c_str());
         else if (k == "window_y") c.windowY = atoi(v.c_str());
@@ -90,6 +91,7 @@ bool config_save(const Config& c, std::string* err) {
     f << "# mouse_through : 鼠标穿透 1/0 (点击直接落到下层窗口)\n";
     f << "# dock_taskbar  : 停靠任务栏 1/0 (变成嵌在任务栏内部的迷你横条)\n";
     f << "# dock_offset_x : 横条在任务栏内的水平偏移像素 (-1 = 默认位置)\n";
+    f << "# dock_offset_y : 竖排任务栏(左/右)时沿垂直方向的偏移像素 (-1 = 默认位置)\n";
     f << "# kline_bar   : 走势图 K 线周期 (5m/15m/1H/4H/1D/1W/1M/3M)\n";
     f << "# popup_width : 弹窗宽度 260-460 (默认 300，越小越紧凑)\n";
     f << "# platform    : 数据源 okx/binance/bybit/gate/mexc/kucoin/htx/bitget\n";
@@ -108,6 +110,7 @@ bool config_save(const Config& c, std::string* err) {
     f << "mouse_through=" << (c.mouseThrough ? 1 : 0) << "\n";
     f << "dock_taskbar=" << (c.dockTaskbar ? 1 : 0) << "\n";
     f << "dock_offset_x=" << c.dockOffsetX << "\n";
+    f << "dock_offset_y=" << c.dockOffsetY << "\n";
     f << "window_x=" << c.windowX << "\n";
     f << "window_y=" << c.windowY << "\n";
     f << "kline_bar=" << c.klineBar << "\n";
