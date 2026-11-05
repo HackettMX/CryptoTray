@@ -1770,12 +1770,14 @@ static void drag_update(HWND h) {
         return (dir == TBR_LEFT) ? (tr.right + 4) : (tr.left - crossSize - 4);
     };
 
-    // 「还贴在任务栏上」用锁存 + 双阈值：进到 4px 内算回到栏上，离开 28px 才算拖出去。
-    // 原来是「抬离 1.5 个任务栏高」，得往上拽 70 多像素才切换，中间那一段一直是横条状态，
-    // 看着就是「拖了半天还没变大窗口」。单阈值又会因为手抖几像素来回翻，所以留了滞回
+    // 「还贴在任务栏上」用锁存 + 双阈值：回到栏边 4px 内算贴回去，离开 28px 才算拖出去。
+    // 注意 gap 的符号：正数＝光标还压在栏上（离内侧边这么远），负数＝已经离开栏这么多。
+    // 所以「回来」是 gap >= -4，「出去」是 gap < -28 —— 写成正数比较的话永远退不出去，
+    // 横条会被死死锁在任务栏里，怎么往上拽都不变大窗口。
+    // 双阈值是为了手抖几像素时不来回翻
     if (hasBar && g_dragDock) {
-        if (gap <= 4)  g_dragAlong = true;
-        if (gap > 28)  g_dragAlong = false;
+        if (gap >= -4)  g_dragAlong = true;
+        if (gap < -28)  g_dragAlong = false;
     } else {
         g_dragAlong = false;
     }
@@ -1805,12 +1807,18 @@ static void drag_update(HWND h) {
         if (fy < mr.top) fy = mr.top;
         if (fx + fw > mr.right) fx = mr.right - fw;
         if (fy + fh > mr.bottom) fy = mr.bottom - fh;
-        hint_show(false, fx, fy, fw, fh);
+        // 节流 20ms：鼠标消息 + 16ms 轮询会双触发，不节流就是 120Hz 重画整个大框
+        const DWORD now = GetTickCount();
+        if (now - g_dragHintTick >= 20) {
+            g_dragHintTick = now;
+            hint_show(false, fx, fy, fw, fh);
+        }
     } else if (hasBar) {
         // 从大窗口拖向任务栏：算落点框。目标位置要查邻居（EnumWindows），
         // 节流到 ~60ms 一次；hint_show 内部还会跳过没有变化的重绘。
-        // 触发距离从 96px 放到 160px：一路拖到任务栏跟前才出框，中间那段是空的
-        if (gap <= 160) {
+        // 触发距离从 96px 放到 160px：一路拖到任务栏跟前才出框，中间那段是空的。
+        // 同样是负数比较：浮窗在栏外，gap <= -160 表示还在 160px 之外，不提示
+        if (gap >= -160) {
             const DWORD now = GetTickCount();
             if (now - g_dragHintTick >= 60) {
                 g_dragHintTick = now;
@@ -1831,8 +1839,8 @@ static void drag_update(HWND h) {
                     hx = cross_pos(hw);
                     gapBox = (dir == TBR_LEFT) ? (hx - (nx + W)) : (nx - (hx + hw));
                 }
-                // 窗口边缘贴住虚线框（差 8px 内）→ 松手即固定
-                const bool locked = (gapBox <= 8) || (gap <= 4);
+                // 窗口边缘贴住虚线框（差 8px 内）→ 松手即固定；光标已经压进栏里也算锁定
+                const bool locked = (gapBox <= 8) || (gap >= -8);
                 hint_show(locked, hx, hy, hw, hh);
             }
         } else {
