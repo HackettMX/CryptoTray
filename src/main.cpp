@@ -588,14 +588,13 @@ static int popup_height(int rows) {
     return 12 + rows * (POPUP_ROW_H + 4) + 4;
 }
 
-// 大窗口（浮窗形态）的尺寸：拖动时算落点框要用，与当前是不是停靠无关
+// 大窗口（浮窗形态）的宽度：与当前是不是停靠无关，只看配置
 static int float_w() {
     int w = g_cfg.popupWidth;
     if (w < POPUP_W_MIN) w = POPUP_W_MIN;
     if (w > POPUP_W_MAX) w = POPUP_W_MAX;
     return w;
 }
-static int float_h() { return popup_height((int)g_cfg.coins.size()); }
 
 // 弹窗宽度：内嵌任务栏时用横条宽度，否则跟随配置（越窄越紧凑）
 static int popup_w() {
@@ -1739,9 +1738,8 @@ static void drag_update(HWND h) {
         return;
     }
     POINT pt; GetCursorPos(&pt);
-    // 位移门槛：鼠标点一下常有几像素手抖，3px 太敏感，一点就进了拖动、弹出落点框，
-    // 看上去就是「点一下闪一下」。已经停靠时更要高一些——那样只是沿任务栏挪位置，
-    // 不值得为一次点击去改写偏移量
+    // 位移门槛：鼠标点一下常有几像素手抖，门槛太低会让一次点击变成「微拖」，
+    // 顺带改写停靠偏移量。已经停靠时更要高一些——那样只是沿任务栏挪位置
     if (!g_dragMoved) {
         const int th = g_dragDock ? 12 : 6;
         int ddx = pt.x - g_dragStart.x, ddy = pt.y - g_dragStart.y;
@@ -1750,12 +1748,6 @@ static void drag_update(HWND h) {
         if (ddx < th && ddy < th) return;
         g_dragMoved = true;
     }
-    // 尺寸与抓取偏移都取自「当前形态」：形态切换时这两个值会重算，
-    // 所以不能再像以前那样用拖动起点的矩形硬算
-    int W = g_dragW;
-    int H = g_dragH;
-    int nx = pt.x - g_dragOffX;
-    int ny = pt.y - g_dragOffY;
 
     RECT tr, mon;
     const TbDir dir = tb_dir_now(&tr, &mon);
@@ -1799,10 +1791,12 @@ static void drag_update(HWND h) {
     // 形态跟着位置走：横条起拖时贴栏就是横条、离开就展开成大窗口；
     // 大窗口起拖时一律保持大窗口，不改尺寸，只靠虚线框提示落点
     drag_form(h, !(g_dragDock && g_dragAlong));
-    W = g_dragW;
-    H = g_dragH;
-    nx = pt.x - g_dragOffX;
-    ny = pt.y - g_dragOffY;
+    // 尺寸与抓取偏移都取自「当前形态」：切形态时它们会被重算，
+    // 所以不能再用拖动起点那个矩形硬算
+    const int W = g_dragW;
+    const int H = g_dragH;
+    int nx = pt.x - g_dragOffX;
+    int ny = pt.y - g_dragOffY;
 
     // 拖动中窗口跟着光标走：只夹在整块显示器内（允许压到任务栏上）。
     // 之前夹在工作区，窗口底边永远到不了任务栏，两态就只能靠光标猜
