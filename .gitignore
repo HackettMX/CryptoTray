@@ -34,3 +34,6 @@ desktop.ini
 
 # ---- 本地运行配置（真实配置在 %APPDATA%\CryptoTray\）----
 config.ini
+
+# ---- 发布打包产物 ----
+/dist/
