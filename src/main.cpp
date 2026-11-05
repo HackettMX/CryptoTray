@@ -624,10 +624,12 @@ static bool taskbar_free_span(LONG& lo, LONG& hi) {
 //   3. 没吸住就自由跟手，但只落在空档里：与邻居相交时推到最近的一侧。
 // 全程纯几何计算，不记「第几个槽位」，所以远离所有吸附点就自然回到自由放置。
 // 拖动是 60fps 循环，每帧 EnumWindows 会把消息循环拖住，所以占位结果带 200ms 缓存。
-static const int DOCK_GAP = 15;         // 与邻居之间留的间距（邻居自己用 15）
+static const int DOCK_GAP = 8;          // 与邻居之间留的间距（原来 15，看着缝太大）
 static const int DOCK_OCC_MAX = 8;
 static const int SNAP_NEAR = 40;        // 吸附阈值：离候选点多近就吸上去
-static const int SNAP_HOLD = 96;        // 吸住后的脱离阈值（滞回，防抖）
+static const int SNAP_HOLD = 56;        // 吸住后的脱离阈值（滞回，防抖）。
+                                        // 原来是 96，拖动时光标和横条能拉开一大段，
+                                        // 看着像「拖了半天它不动」
 
 static DWORD g_occTick = 0;
 static bool  g_occValid = false;
@@ -1055,11 +1057,18 @@ static void dock_present(HWND h) {
 
     RECT rc = { 0, 0, W, H };
     HBRUSH bk = CreateSolidBrush(RGB(0, 0, 0));   // 黑底＝全透明，也是预乘的零点
+    // 拖动中的横条会离开任务栏的浅色底、直接浮在桌面或别的窗口上，纯文字根本看不清。
+    // 这时临时铺一块和浮窗同款的底板，松手落回任务栏再恢复全透明。
+    // 遮罩层要一起铺：alpha 由亮度算出来，只铺颜色层的话底板会是黑底、边缘发黑
+    const bool plate = g_dragging && g_dragMoved;
     HGDIOBJ old = SelectObject(mdc, bmA);
     FillRect(mdc, &rc, bk);
+    if (plate) draw_rounded_rect(mdc, rc, popup_radius(), RGB(255, 255, 255), RGB(255, 255, 255));
     paint_dock(mdc, rc, true);                    // 遮罩：只认覆盖率
     SelectObject(mdc, bmB);                       // 之后一直保持 bmB 选中，提交时要用
     FillRect(mdc, &rc, bk);
+    if (plate) draw_rounded_rect(mdc, rc, popup_radius(),
+                                 RGB(0xFA, 0xFA, 0xFA), RGB(0xDC, 0xDF, 0xE4));
     paint_dock(mdc, rc, false);                   // 真彩
     DeleteObject(bk);
 
@@ -1652,6 +1661,7 @@ static void drag_update(HWND h) {
         if (ddy < 0) ddy = -ddy;
         if (ddx < th && ddy < th) return;
         g_dragMoved = true;
+        popup_render(h);      // 真拖起来了才上底板，单击不会闪一下
     }
     int W = g_dragRect.right - g_dragRect.left;
     int H = g_dragRect.bottom - g_dragRect.top;
