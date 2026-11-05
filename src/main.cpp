@@ -1689,35 +1689,16 @@ static void drag_update(HWND h) {
     }
 
     if (hasBar && g_dragAlong) {
-        // 沿任务栏拖动：横条本身跟着光标走（只夹在可用带里，不跟邻居抢位），
-        // 同时用落点框标出「松手会停在哪」—— 落点走磁性吸附，所以框会吸到最左、
-        // 最右、邻居两侧；横条是连续的跟手移动，不会一格一格地跳
+        // 沿任务栏拖动：横条按「磁性吸附」直接被吸着走（吸附点都避开邻居），竖直锁在栏里。
+        // 期望位置 = 光标按住的那一点，所以空档里就是跟手；靠近最左/最右/邻居时吸上去，
+        // 吸住以后要拉出 SNAP_HOLD 才换位置 —— 这就是「拖到最右贴最右，往左拖一段才动」。
+        // 这时横条自己就在落点上，不再画落点框（叠一层只会把它盖住）
         const int trayH = tr.bottom - tr.top;
         ny = tr.top + (trayH - H) / 2;
         LONG lo = 0, hi = 0;
         taskbar_free_span(lo, hi);
-        const int minX = (int)lo;
-        int maxX = (int)hi - W;
-        if (maxX < minX) maxX = minX;
-        nx = pt.x - grabX0;
-        if (nx < minX) nx = minX;
-        if (nx > maxX) nx = maxX;
-
-        // 落点框节流到 ~20ms：鼠标消息和 16ms 轮询会双触发，不节流就是两个落点框
-        const DWORD now = GetTickCount();
-        if (now - g_dragHintTick >= 20) {
-            g_dragHintTick = now;
-            const int hw = dock_w(), hh = dock_h();
-            // 抓取点按落点框宽度换算：竖排浮窗和横条宽度差得多，直接用会偏出去
-            const int gx = (W > 0) ? grabX0 * hw / W : hw / 2;
-            const int hx = dock_target_x(hw, pt.x - gx, lo, hi);
-            const int hy = tr.top + (trayH - hh) / 2;
-            // 落点跟横条自己重合时不画框：叠一层反而把横条盖住了。
-            // 空档里自由移动两者基本一致，只有靠近吸附点 / 被邻居挤的时候框才拉开，
-            // 这时候的框才是真正有用的信息
-            if (hx - nx <= 2 && nx - hx <= 2 && hy - ny <= 2 && ny - hy <= 2) hint_hide();
-            else hint_show(true, hx, hy, hw, hh);   // 亮着的框 = 松手停在这
-        }
+        nx = dock_target_x(W, pt.x - grabX0, lo, hi);
+        hint_hide();
     } else if (hasBar) {
         // 从浮窗拖向任务栏：算落点框。目标位置要查邻居（EnumWindows），
         // 节流到 ~60ms 一次；hint_show 内部还会跳过没有变化的重绘
