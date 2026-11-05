@@ -1660,11 +1660,8 @@ static void drag_update(HWND h) {
 
     // 鼠标按在窗口里的哪一点：落点按这个点对位（而不是窗口中心），拖起来才跟手
     int grabX0 = g_dragStart.x - g_dragRect.left;
-    int grabY0 = g_dragStart.y - g_dragRect.top;
     if (grabX0 < 0) grabX0 = 0;
-    if (grabY0 < 0) grabY0 = 0;
     if (W > 0 && grabX0 > W - 1) grabX0 = W - 1;
-    if (H > 0 && grabY0 > H - 1) grabY0 = H - 1;
 
     // 拖动中窗口跟着光标走：只夹在整块显示器内（允许压到任务栏上）。
     // 之前夹在工作区，窗口底边永远到不了任务栏，两态就只能靠光标猜
@@ -1691,44 +1688,35 @@ static void drag_update(HWND h) {
         g_dragAlong = false;
     }
 
-    // 从横条拖起时：拖动期间只动虚框，真横条原地不动，松手才一次性落位。
-    // 横条本体在拖动中反复搬家，会连带挤动邻居控件（汽水播控那些）跟着重排，
-    // 看着就是拖一下就闪一下；而虚框本来就把落点说清楚了，横条没必要跟着爬
-    const bool ghost = g_dragDock;
-
     if (hasBar && g_dragAlong) {
-        // 沿任务栏拖：虚框按「磁性吸附」算水平位置（吸附点都避开邻居），竖直锁在栏里。
-        // 期望位置 = 光标按住的那一点，所以空档里就是跟手；靠近最左/最右/邻居时吸上去，
-        // 吸住以后要拉出 SNAP_HOLD 才换位置 —— 这就是「拖到最右贴最右，往左拖一段才动」
-        // 鼠标消息和 16ms 轮询会双触发，所以虚框也节流到 ~20ms 一次，不跟着双倍刷新
+        // 沿任务栏拖动：横条本身跟着光标走（只夹在可用带里，不跟邻居抢位），
+        // 同时用落点框标出「松手会停在哪」—— 落点走磁性吸附，所以框会吸到最左、
+        // 最右、邻居两侧；横条是连续的跟手移动，不会一格一格地跳
+        const int trayH = tr.bottom - tr.top;
+        ny = tr.top + (trayH - H) / 2;
+        LONG lo = 0, hi = 0;
+        taskbar_free_span(lo, hi);
+        const int minX = (int)lo;
+        int maxX = (int)hi - W;
+        if (maxX < minX) maxX = minX;
+        nx = pt.x - grabX0;
+        if (nx < minX) nx = minX;
+        if (nx > maxX) nx = maxX;
+
+        // 落点框节流到 ~20ms：鼠标消息和 16ms 轮询会双触发，不节流就是两个落点框
         const DWORD now = GetTickCount();
         if (now - g_dragHintTick >= 20) {
             g_dragHintTick = now;
-            const int trayH = tr.bottom - tr.top;
             const int hw = dock_w(), hh = dock_h();
-            LONG lo = 0, hi = 0;
-            taskbar_free_span(lo, hi);
-            // 抓取点按虚框宽度换算：竖排浮窗和横条宽度差得多，直接用会偏出去
+            // 抓取点按落点框宽度换算：竖排浮窗和横条宽度差得多，直接用会偏出去
             const int gx = (W > 0) ? grabX0 * hw / W : hw / 2;
             const int hx = dock_target_x(hw, pt.x - gx, lo, hi);
-            hint_show(true, hx, tr.top + (trayH - hh) / 2, hw, hh);  // 亮着的框 = 松手停在这
-        }
-    } else if (ghost) {
-        // 横条被抬离任务栏：虚框换成浮窗形态跟手，横条本体仍然留在原地
-        const DWORD now = GetTickCount();
-        if (now - g_dragHintTick >= 20) {
-            g_dragHintTick = now;
-            int fw = g_cfg.popupWidth;
-            if (fw < POPUP_W_MIN) fw = POPUP_W_MIN;
-            if (fw > POPUP_W_MAX) fw = POPUP_W_MAX;
-            const int fh = popup_height((int)g_cfg.coins.size());
-            int fx = pt.x - ((W > 0) ? grabX0 * fw / W : fw / 2);
-            int fy = pt.y - ((H > 0) ? grabY0 * fh / H : fh / 2);
-            if (fx < mr.left) fx = mr.left;
-            if (fy < mr.top) fy = mr.top;
-            if (fx + fw > mr.right) fx = mr.right - fw;
-            if (fy + fh > mr.bottom) fy = mr.bottom - fh;
-            hint_show(false, fx, fy, fw, fh);
+            const int hy = tr.top + (trayH - hh) / 2;
+            // 落点跟横条自己重合时不画框：叠一层反而把横条盖住了。
+            // 空档里自由移动两者基本一致，只有靠近吸附点 / 被邻居挤的时候框才拉开，
+            // 这时候的框才是真正有用的信息
+            if (hx - nx <= 2 && nx - hx <= 2 && hy - ny <= 2 && ny - hy <= 2) hint_hide();
+            else hint_show(true, hx, hy, hw, hh);   // 亮着的框 = 松手停在这
         }
     } else if (hasBar) {
         // 从浮窗拖向任务栏：算落点框。目标位置要查邻居（EnumWindows），
@@ -1765,20 +1753,17 @@ static void drag_update(HWND h) {
 
     // 位置没变就不要 SetWindowPos：WM_MOUSEMOVE 和 16ms 轮询会双触发，
     // 一次移动变成两次搬家。另外这里用 SWP_NOZORDER —— 每帧 HWND_TOPMOST 都会把
-    // 横条提到置顶组最前面，置顶组里的汽水播控于是被反复重组、重绘，跟着一起闪。
-    // 从横条拖起时（ghost）整个拖动过程都不碰窗口位置，只在松手时落位
-    if (!ghost) {
-        RECT cr0;
-        const bool moved = !GetWindowRect(h, &cr0) || cr0.left != nx || cr0.top != ny;
-        if (moved) {
-            // 一次移动超过 40px 说明是「跳点」（吸附换了落点），邻居多半会跟着收缩 / 挪位。
-            // 立刻作废占位缓存，下一帧按它的新位置重算；不这样的话会按旧位置把横条多推出去一截
-            int jump = cr0.left - nx;
-            if (jump < 0) jump = -jump;
-            if (jump > 40 && GetTickCount() - g_occTick > 100) g_occValid = false;
-            SetWindowPos(h, NULL, nx, ny, 0, 0,
-                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-        }
+    // 横条提到置顶组最前面，置顶组里的汽水播控于是被反复重组、重绘，跟着一起闪
+    RECT cr0;
+    const bool moved = !GetWindowRect(h, &cr0) || cr0.left != nx || cr0.top != ny;
+    if (moved) {
+        // 一次移动超过 40px 说明是「跳点」（吸附换了落点），邻居多半会跟着收缩 / 挪位。
+        // 立刻作废占位缓存，下一帧按它的新位置重算；不这样的话会按旧位置把横条多推出去一截
+        int jump = cr0.left - nx;
+        if (jump < 0) jump = -jump;
+        if (jump > 40 && GetTickCount() - g_occTick > 100) g_occValid = false;
+        SetWindowPos(h, NULL, nx, ny, 0, 0,
+                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
 }
 
