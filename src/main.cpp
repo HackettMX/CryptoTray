@@ -614,6 +614,121 @@ static bool taskbar_free_span(LONG& lo, LONG& hi) {
     return hi > lo + 40;
 }
 
+// ---- 任务栏上的「邻居」----
+// 汽水音乐的播控卡片这类第三方控件同样贴在任务栏上，它们会算「这一段任务栏还剩多少空」
+// 来决定自己摆哪、多宽。我们的横条一旦压在它身上，它就会挪位甚至收缩成窄条，
+// 看起来就是「点一下闪一下、拖动时一直在闪」。所以先把别人的占位量出来，
+// 再把自己塞进真正的空档里：两边都不用动，自然就不闪了。
+static const int DOCK_GAP = 24;        // 与邻居之间保持的间距（比汽水播控自己留的 12px 更大一点）
+// 刚出现 / 刚换完位置的一小段时间里允许重新挑位置：汽水播控在我们出现之前是展开的大卡片，
+// 先把位置让给它，等它收缩成小条之后我们再滑回想去的地方；过了这段时间就咬住不动
+static DWORD g_dockSettle = 0;
+static const int DOCK_OCC_MAX = 24;
+
+struct XSpan { LONG lo; LONG hi; };
+struct OccCtx { RECT tr; XSpan* out; int n; int cap; };
+
+// 只认「基本躺在任务栏里」的窗口：通知中心、托盘右键菜单、Toast 都会往上探出一大截，
+// 那些是临时弹出物，不该被我们当成邻居去躲
+static BOOL CALLBACK occ_enum_proc(HWND h, LPARAM lp) {
+    OccCtx* c = (OccCtx*)lp;
+    if (!IsWindowVisible(h) || IsIconic(h)) return TRUE;
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(h, &pid);
+    if (pid == GetCurrentProcessId()) return TRUE;     // 自己的横条 / 提示框 / 消息窗
+
+    BOOL cloaked = FALSE;                              // UWP 挂起后留下的空壳
+    if (SUCCEEDED(DwmGetWindowAttribute(h, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked)
+        return TRUE;
+
+    RECT r;
+    if (!GetWindowRect(h, &r)) return TRUE;
+
+    // 任务栏自己（以及桌面、托盘溢出窗）当然不能算邻居，否则整条任务栏都被判成「占满」
+    wchar_t cls[64] = { 0 };
+    GetClassNameW(h, cls, 64);
+    if (!wcscmp(cls, L"Shell_TrayWnd") || !wcscmp(cls, L"Shell_SecondaryTrayWnd") ||
+        !wcscmp(cls, L"Progman") || !wcscmp(cls, L"WorkerW") ||
+        !wcscmp(cls, L"NotifyIconOverflowWindow"))
+        return TRUE;
+
+    const LONG trayH = c->tr.bottom - c->tr.top;
+    const LONG hgt = r.bottom - r.top;
+    if (hgt <= 0 || hgt > trayH + 16) return TRUE;      // 比任务栏高得多：不是同类控件
+
+    const LONG top = (r.top > c->tr.top) ? r.top : c->tr.top;
+    const LONG bot = (r.bottom < c->tr.bottom) ? r.bottom : c->tr.bottom;
+    if (bot - top < hgt * 3 / 4) return TRUE;           // 只在任务栏边缘蹭到一点点
+
+    LONG lo = (r.left > c->tr.left) ? r.left : c->tr.left;
+    LONG hi = (r.right < c->tr.right) ? r.right : c->tr.right;
+    if (hi - lo < 8) return TRUE;
+
+    if (c->n < c->cap) { c->out[c->n].lo = lo; c->out[c->n].hi = hi; c->n++; }
+    return TRUE;
+}
+
+static int occ_collect(const RECT& tr, XSpan* out, int cap) {
+    OccCtx c = { tr, out, 0, cap };
+    EnumWindows(occ_enum_proc, (LPARAM)&c);
+    std::sort(out, out + c.n, [](const XSpan& a, const XSpan& b) { return a.lo < b.lo; });
+    return c.n;
+}
+
+// 把 [lo, hi] 减掉邻居占位，得到一串真正空着的横向区间
+static int dock_free_spans(LONG lo, LONG hi, XSpan* out, int cap) {
+    if (hi <= lo) return 0;
+    RECT tr, mon;
+    XSpan occ[DOCK_OCC_MAX];
+    int n = taskbar_rect(tr, mon) ? occ_collect(tr, occ, DOCK_OCC_MAX) : 0;
+
+    int m = 0;
+    LONG cur = lo;
+    for (int i = 0; i <= n; i++) {
+        LONG end = (i < n) ? occ[i].lo - DOCK_GAP : hi;
+        if (end > hi) end = hi;
+        if (end - cur >= 8 && m < cap) { out[m].lo = cur; out[m].hi = end; m++; }
+        if (i < n && occ[i].hi + DOCK_GAP > cur) cur = occ[i].hi + DOCK_GAP;
+        if (cur >= hi) break;
+    }
+    return m;
+}
+
+// 在空档里给宽 W 的横条找位置：优先贴近 preferX（想放的地方），
+// 所有空档都放不下时退回夹在 [lo, hi] 内（宁可重叠，也别跑出任务栏）
+static int dock_fit_x(int W, LONG lo, LONG hi, int preferX) {
+    XSpan sp[16];
+    int m = dock_free_spans(lo, hi, sp, 16);
+
+    int bestX = preferX, bestCost = 0;
+    bool found = false;
+    for (int i = 0; i < m; i++) {
+        if (sp[i].hi - sp[i].lo < W) continue;
+        int x = preferX;
+        if (x < sp[i].lo)         x = (int)sp[i].lo;
+        if (x > sp[i].hi - W)     x = (int)(sp[i].hi - W);
+        int cost = (x > preferX) ? (x - preferX) : (preferX - x);
+        if (!found || cost < bestCost) { found = true; bestX = x; bestCost = cost; }
+    }
+    if (found) return bestX;
+
+    int x = preferX;
+    if (x + W > hi) x = (int)(hi - W);
+    if (x < lo)     x = (int)lo;
+    return x;
+}
+
+// x..x+W 是否整段都落在空档里
+static bool dock_x_free(int x, int W, LONG lo, LONG hi) {
+    if (x < lo || x + W > hi) return false;
+    XSpan sp[16];
+    int m = dock_free_spans(lo, hi, sp, 16);
+    for (int i = 0; i < m; i++)
+        if (x >= sp[i].lo && x + W <= sp[i].hi) return true;
+    return false;
+}
+
 // 内嵌任务栏：横条落在任务栏内部（覆盖在任务栏之上的同层窗口），竖直居中
 static bool dock_place(int W, int H, int& x, int& y) {
     RECT tr, mon;
@@ -650,7 +765,15 @@ static bool dock_place(int W, int H, int& x, int& y) {
     if (off < spanLo - 40) off = spanLo - 40;
     if (off < 4) off = 4;
 
-    x = tr.left + off;
+    // 现在的落点只要没人抢就别动：频繁微调自己会让邻居跟着重排，看着就是闪。
+    // 真被别的控件压住了，才让到离「想去的位置」最近的空档
+    const int wantX = tr.left + off;
+    RECT cur;
+    const bool haveCur = g_hWnd && IsWindow(g_hWnd) && IsWindowVisible(g_hWnd) &&
+                         GetWindowRect(g_hWnd, &cur);
+    const bool settling = g_dockSettle && (LONG)(GetTickCount() - g_dockSettle) < 0;
+    if (!settling && haveCur && dock_x_free((int)cur.left, W, lo, hi)) x = (int)cur.left;
+    else                                                                x = dock_fit_x(W, lo, hi, wantX);
     return true;
 }
 
@@ -1218,6 +1341,7 @@ static void show_popup() {
     if (!g_hWnd || !IsWindow(g_hWnd)) return;
     if (g_popupVisible) return;
 
+    g_dockSettle = GetTickCount() + 3000;   // 先上屏，几秒内允许给自己重新挑个空档
     int W = popup_w(), H = popup_h();
     int x = 0, y = 0;
     popup_place(W, H, x, y);
@@ -1261,6 +1385,7 @@ static void hide_popup() {
 // 币种数 / 形态变化后重算尺寸与位置：竖排回记录位置，横条贴任务栏
 static void relayout_popup() {
     if (!g_hWnd || !IsWindow(g_hWnd)) return;
+    g_dockSettle = GetTickCount() + 3000;   // 刚换完位置：允许重新挑空档
     int W = popup_w(), H = popup_h();
 
     int x = 0, y = 0;
@@ -1473,8 +1598,6 @@ static void drag_update(HWND h) {
     if (ny < mr.top) ny = mr.top;
     if (nx + W > mr.right) nx = mr.right - W;
     if (ny + H > mr.bottom) ny = mr.bottom - H;
-    SetWindowPos(h, HWND_TOPMOST, nx, ny, 0, 0,
-                 SWP_NOSIZE | SWP_NOACTIVATE);
 
     // 落点判定以「窗口边缘」到任务栏/虚线框的间距为准，不再看光标：
     // 光标按在窗口的哪一处并不固定，只看光标会和眼里看到的窗口位置对不上。
@@ -1501,7 +1624,8 @@ static void drag_update(HWND h) {
             if (off + hw > (int)(hi - tr.left)) off = (int)(hi - tr.left) - hw;
             if (off < (int)(lo - tr.left)) off = (int)(lo - tr.left);
             if (off < 4) off = 4;
-            hx = tr.left + off;
+            // 磁吸到空档：落点框同样不压在汽水播控这类邻居身上
+            hx = dock_fit_x(hw, lo, hi, tr.left + off);
             hy = tr.top + (trayH - hh) / 2;
 
             // 窗口边缘贴住虚线框（差 8px 内）→ 松手即固定。
@@ -1515,6 +1639,12 @@ static void drag_update(HWND h) {
     // 点一下（带几像素手抖）更不该弹出框来闪一下
     if (nearBar && !(g_dragDock && cursorOnBar)) hint_show(locked, hx, hy, hw, hh);
     else                                         hint_hide();
+
+    // 沿任务栏拖动时窗口也吸到空档上，别让它从汽水播控这类控件身上扫过去：
+    // 掠过的瞬间对方会挪位 / 收缩，肉眼看到的就是「一直在闪」
+    if (nearBar && g_dragDock && cursorOnBar) { nx = hx; ny = hy; }
+
+    SetWindowPos(h, HWND_TOPMOST, nx, ny, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
 static void drag_finish(HWND h) {
