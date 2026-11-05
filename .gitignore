@@ -1,0 +1,36 @@
+# ---- 构建产物 ----
+/build/
+*.obj
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.lib
+*.exp
+*.iobj
+*.ipdb
+*.idb
+*.res
+
+# ---- CMake / IDE ----
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.sln
+*.vcxproj*
+.vs/
+.vscode/
+out/
+
+# ---- 系统 / 编辑器 ----
+Thumbs.db
+desktop.ini
+.DS_Store
+*.swp
+*~
+
+# ---- WorkBuddy 本地项目数据（含会话与记忆，绝不外发）----
+/.workbuddy/
+
+# ---- 本地运行配置（真实配置在 %APPDATA%\CryptoTray\）----
+config.ini
