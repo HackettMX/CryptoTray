@@ -19,6 +19,7 @@ add_executable(CryptoTray WIN32
     src/http.cpp
     src/market.cpp
     src/config.cpp
+    src/i18n.cpp
 )
 target_include_directories(CryptoTray PRIVATE src)
 target_link_libraries(CryptoTray PRIVATE winhttp comctl32 shell32 dwmapi uxtheme)

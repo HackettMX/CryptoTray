@@ -5,6 +5,7 @@
 // 全局配置（持久化到 %APPDATA%\CryptoTray\config.ini）
 struct Config {
     std::string platform = "okx"; // 数据源：okx/binance/bybit/gate/mexc/kucoin/htx/bitget
+    std::string lang = "";       // 界面语言：zh-CN / zh-TW / en-US（空 = 首次运行按系统语言自动选）
     int bgInterval = 30;         // 后台刷新间隔（秒）
     int winInterval = 5;         // 窗口显示时的刷新间隔（秒）
     std::vector<std::string> coins = { "BTC-USDT", "ETH-USDT", "SOL-USDT" };

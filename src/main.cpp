@@ -13,6 +13,7 @@
 #include <ctime>
 #include <algorithm>
 #include "util.hpp"
+#include "i18n.hpp"
 #include "json.hpp"
 #include "market.hpp"
 #include "http.hpp"
@@ -81,6 +82,7 @@
 #define IDC_TOPMOST  2014
 #define IDC_DOCK_SW  2015
 #define IDC_PF_BASE  2100     // 数据源按钮：2100 + 平台下标（共 8 个）
+#define IDC_LANG_BASE 2120    // 语言按钮：2120 + 语言下标
 
 static const int POPUP_RADIUS = 12;
 static const int SETTINGS_RADIUS = 14;
@@ -434,7 +436,7 @@ static void create_tray() {
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uCallbackMessage = WM_TRAY;
     g_nid.hIcon = g_hIcon;
-    wcsncpy(g_nid.szTip, L"CryptoTray 行情", 127);
+    wcsncpy(g_nid.szTip, TR(L"tray.tip"), 127);
     g_nid.szTip[127] = 0;
     Shell_NotifyIconW(NIM_ADD, &g_nid);
     g_nid.uVersion = 4;
@@ -626,7 +628,7 @@ static void paint_dock(HDC dc, const RECT& rc, bool mono) {
         SelectObject(dc, g_fontSmall);
         SetTextColor(dc, C(RGB(0x99, 0x99, 0x99)));
         RECT mr = rc;
-        DrawTextW(dc, L"暂无关注币种，右键托盘 → 设置 添加", -1, &mr,
+        DrawTextW(dc, TR(L"ui.empty"), -1, &mr,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         return;
     }
@@ -639,7 +641,7 @@ static void paint_dock(HDC dc, const RECT& rc, bool mono) {
         CoinView v;
         auto it = m.find(id);
         if (it != m.end()) v = it->second;
-        else { v.instId = id; v.ok = false; v.err = "加载中"; }
+        else { v.instId = id; v.ok = false; v.err = "loading"; }
 
         const int cx = DOCK_PAD + i * cellW;
         if (i > 0) {                       // 格间细分隔线
@@ -729,7 +731,7 @@ static void paint_popup(HDC dc, const RECT& rc) {
         SelectObject(dc, g_fontSmall);
         SetTextColor(dc, RGB(0x99, 0x99, 0x99));
         RECT mr = rr;
-        DrawTextW(dc, L"暂无关注币种，右键托盘 → 设置 添加", -1, &mr,
+        DrawTextW(dc, TR(L"ui.empty"), -1, &mr,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         return;
     }
@@ -737,7 +739,7 @@ static void paint_popup(HDC dc, const RECT& rc) {
     for (const auto& id : coins) {
         CoinView v;
         auto it = m.find(id);
-        if (it != m.end()) v = it->second; else { v.instId = id; v.ok = false; v.err = "加载中"; }
+        if (it != m.end()) v = it->second; else { v.instId = id; v.ok = false; v.err = "loading"; }
 
         RECT rr = { padding, y, rc.right - padding, y + rowH };
 
@@ -781,7 +783,7 @@ static void paint_popup(HDC dc, const RECT& rc) {
             SelectObject(dc, g_fontSmall);
             SetTextColor(dc, RGB(0xE0, 0x6C, 0x5C));
             RECT er = { colSplit, rr.top + 30, textR, rr.top + 50 };
-            DrawTextW(dc, to_w(v.err).c_str(), -1, &er,
+            DrawTextW(dc, i18n::err_text(v.err).c_str(), -1, &er,
                       DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         }
 
@@ -1111,7 +1113,7 @@ static void hint_paint(HWND h) {
     SetBkMode(dc, TRANSPARENT);
     SelectObject(dc, g_fontChange ? g_fontChange : g_fontSmall);
     SetTextColor(dc, RGB(0x46, 0x57, 0x77));
-    DrawTextW(dc, g_hintDock ? L"松手固定窗口" : L"将窗口移到此处", -1, &rc,
+    DrawTextW(dc, g_hintDock ? TR(L"hint.pin") : TR(L"hint.move"), -1, &rc,
               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     EndPaint(h, &ps);
@@ -1254,19 +1256,19 @@ static void tray_click(bool dbl) {
 static void show_context_menu() {
     POINT p; GetCursorPos(&p);
     HMENU m = CreatePopupMenu();
-    AppendMenuW(m, MF_STRING, IDM_SETTINGS, L"设置...");
+    AppendMenuW(m, MF_STRING, IDM_SETTINGS, TR(L"menu.settings"));
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(m, MF_STRING, IDM_TOPMOST, L"置于最顶层");
-    AppendMenuW(m, MF_STRING, IDM_THROUGH, L"鼠标穿透");
-    AppendMenuW(m, MF_STRING, IDM_DOCK, L"嵌入任务栏");
+    AppendMenuW(m, MF_STRING, IDM_TOPMOST, TR(L"menu.topmost"));
+    AppendMenuW(m, MF_STRING, IDM_THROUGH, TR(L"menu.through"));
+    AppendMenuW(m, MF_STRING, IDM_DOCK, TR(L"menu.dock"));
     CheckMenuItem(m, IDM_TOPMOST, MF_BYCOMMAND | (g_cfg.alwaysOnTop ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(m, IDM_THROUGH, MF_BYCOMMAND | (g_cfg.mouseThrough ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(m, IDM_DOCK, MF_BYCOMMAND | (g_cfg.dockTaskbar ? MF_CHECKED : MF_UNCHECKED));
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(m, MF_STRING, IDM_SPONSOR, L"❤ 赞助支持");
-    AppendMenuW(m, MF_STRING, IDM_STAR, L"为项目点个 Star");
+    AppendMenuW(m, MF_STRING, IDM_SPONSOR, TR(L"menu.sponsor"));
+    AppendMenuW(m, MF_STRING, IDM_STAR, TR(L"menu.star"));
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(m, MF_STRING, IDM_EXIT, L"退出");
+    AppendMenuW(m, MF_STRING, IDM_EXIT, TR(L"menu.exit"));
     // 菜单位置：TPM_BOTTOMALIGN 让菜单底边落在 p.y。
     // 光标在任务栏里时，把 p.y 抬到该显示器工作区的底边，
     // 菜单就整块浮在任务栏上方，不会压进任务栏区域被它盖住。
@@ -1617,11 +1619,22 @@ static RECT pf_rect(int i) {
 }
 static const int SW_X = 356, SW_W = 48, SW_H = 26;      // 自绘开关
 
+// 语言切换胶囊：放在标题栏右侧，不占用卡片高度（设置窗已经排满，不能再加行）
+static const int LANG_W = 46, LANG_H = 24, LANG_GAP = 4, LANG_Y = 20;
+static const int LANG_RIGHT = 380;                      // 与标题绘制区右边界一致
+static RECT lang_rect(int i) {
+    int n = i18n::count();
+    int total = n * LANG_W + (n - 1) * LANG_GAP;
+    int x = LANG_RIGHT - total + i * (LANG_W + LANG_GAP);
+    RECT r = { x, LANG_Y, x + LANG_W, LANG_Y + LANG_H };
+    return r;
+}
+
 // K 线周期胶囊（8 个，两行各 4 个）
 struct BarOpt { const wchar_t* label; const char* value; };
 static const BarOpt kBars[] = {
-    { L"5 分钟",  "5m" }, { L"15 分钟", "15m" }, { L"1 小时", "1H" }, { L"4 小时", "4H" },
-    { L"1 天",    "1D" }, { L"1 周",    "1W" },  { L"1 月",   "1M" }, { L"3 月",   "3M" },
+    { L"bar.5m",  "5m" }, { L"bar.15m", "15m" }, { L"bar.1h", "1H" }, { L"bar.4h", "4H" },
+    { L"bar.1d",    "1D" }, { L"bar.1w",    "1W" },  { L"bar.1m",   "1M" }, { L"bar.3m",   "3M" },
 };
 static const int kBarsCount = (int)(sizeof(kBars) / sizeof(kBars[0]));
 static const int BAR_X0 = 32, BAR_W = 86, BAR_GAP = 8;
@@ -1721,9 +1734,12 @@ static void draw_settings(HWND h, HDC dc, const RECT& rc) {
     RECT mark = { 20, 20, 32, 32 };
     draw_rounded_rect(dc, mark, 4, ACCENT, ACCENT);
     RECT tr = { 40, 14, rc.right - 60, 38 };
-    ui_text(dc, fT, TXT, L"CryptoTray 设置", tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    ui_text(dc, fT, TXT, TR(L"set.title"), tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     RECT sr = { 41, 36, rc.right - 60, 54 };
-    ui_text(dc, fM, SUB, L"行情刷新与外观", sr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    ui_text(dc, fM, SUB, TR(L"set.subtitle"), sr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    // 语言切换：胶囊本身是子按钮（WM_DRAWITEM 自绘）。
+    // 这里不画文字标签——英文标题「CryptoTray Settings」会顶到标签位置。
 
     // 顶部分隔线
     HPEN pen = CreatePen(PS_SOLID, 1, RGB(0xEC, 0xEE, 0xF2));
@@ -1733,15 +1749,15 @@ static void draw_settings(HWND h, HDC dc, const RECT& rc) {
 
     // ---- 卡片 1：刷新频率 ----
     draw_card(dc, 76, 142);
-    ui_text(dc, fS, SUB, L"刷新频率", RECT{ 32, 86, 300, 106 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    ui_text(dc, fS, SUB, TR(L"sec.rate"), RECT{ 32, 86, 300, 106 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-    ui_text(dc, fN, TXT, L"后台刷新间隔", RECT{ 32, 112, 260, 144 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    ui_text(dc, fN, TXT, TR(L"set.bg_interval"), RECT{ 32, 112, 260, 144 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     draw_field(dc, RECT{ FIELD_X, 112, FIELD_X + FIELD_W, 144 }, GetFocus() == GetDlgItem(h, IDC_BG));
-    ui_text(dc, fM, SUB, L"秒", RECT{ FIELD_X + FIELD_W + 6, 112, 420, 144 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    ui_text(dc, fM, SUB, TR(L"unit.sec"), RECT{ FIELD_X + FIELD_W + 6, 112, 420, 144 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-    ui_text(dc, fN, TXT, L"窗口显示时刷新", RECT{ 32, 150, 260, 182 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    ui_text(dc, fN, TXT, TR(L"set.win_interval"), RECT{ 32, 150, 260, 182 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     draw_field(dc, RECT{ FIELD_X, 150, FIELD_X + FIELD_W, 182 }, GetFocus() == GetDlgItem(h, IDC_WIN));
-    ui_text(dc, fM, SUB, L"秒", RECT{ FIELD_X + FIELD_W + 6, 150, 420, 182 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    ui_text(dc, fM, SUB, TR(L"unit.sec"), RECT{ FIELD_X + FIELD_W + 6, 150, 420, 182 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     // 限频提示（按输入框里的即时值计算，改数字立即反馈）
     int curCoins = (int)SendMessageW(GetDlgItem(h, IDC_LIST), LB_GETCOUNT, 0, 0);
@@ -1749,11 +1765,11 @@ static void draw_settings(HWND h, HDC dc, const RECT& rc) {
     int per2s = est_req_per_2s_for(curCoins, curWin);
     wchar_t hint[160];
     if (per2s > 16) {
-        swprintf(hint, _countof(hint), L"约 %d 次 / 2 秒，已超安全阈值（16），可能被限频", per2s);
+        swprintf(hint, _countof(hint), TR(L"hint.rate_over"), per2s);
     } else if (per2s > 12) {
-        swprintf(hint, _countof(hint), L"约 %d 次 / 2 秒，接近安全阈值（16），建议放慢", per2s);
+        swprintf(hint, _countof(hint), TR(L"hint.rate_near"), per2s);
     } else {
-        swprintf(hint, _countof(hint), L"当前约 %d 次请求 / 2 秒 · 本地限流 16 次 / 2 秒", per2s);
+        swprintf(hint, _countof(hint), TR(L"hint.rate_ok"), per2s);
     }
     COLORREF hintColor = (per2s > 16) ? RGB(0xD9, 0x3B, 0x2B)
                        : (per2s > 12) ? RGB(0xC8, 0x7A, 0x00)
@@ -1762,8 +1778,8 @@ static void draw_settings(HWND h, HDC dc, const RECT& rc) {
 
     // ---- 卡片 2：关注币种 ----
     draw_card(dc, 230, 218);
-    ui_text(dc, fS, SUB, L"关注币种", RECT{ 32, 240, 200, 260 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    ui_text(dc, fM, SUB, L"格式如 BTC-USDT", RECT{ 240, 240, 408, 260 }, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+    ui_text(dc, fS, SUB, TR(L"sec.coins"), RECT{ 32, 240, 200, 260 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    ui_text(dc, fM, SUB, TR(L"set.coin_hint"), RECT{ 240, 240, 408, 260 }, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
     // 列表底槽
     {
@@ -1775,8 +1791,8 @@ static void draw_settings(HWND h, HDC dc, const RECT& rc) {
 
     // ---- 卡片 3：数据源 ----
     draw_card(dc, 460, 112);
-    ui_text(dc, fS, SUB, L"数据源", RECT{ 32, 466, 200, 486 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    ui_text(dc, fM, SUB, L"公开行情接口 · 无需 API Key",
+    ui_text(dc, fS, SUB, TR(L"sec.source"), RECT{ 32, 466, 200, 486 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    ui_text(dc, fM, SUB, TR(L"set.source_hint"),
         RECT{ 180, 466, 408, 486 }, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
     // 按钮由 8 个自绘 BUTTON 承载，这里只画底槽外的空白（选中态在 WM_DRAWITEM 里画）
     {
@@ -1789,8 +1805,8 @@ static void draw_settings(HWND h, HDC dc, const RECT& rc) {
 
     // ---- 卡片 4：走势图周期 ----
     draw_card(dc, 584, 138);
-    ui_text(dc, fS, SUB, L"走势图周期", RECT{ 32, 594, 200, 614 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    ui_text(dc, fM, SUB, L"每行 30 根", RECT{ 240, 594, 408, 614 }, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+    ui_text(dc, fS, SUB, TR(L"sec.bars"), RECT{ 32, 594, 200, 614 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    ui_text(dc, fM, SUB, TR(L"set.bars_hint"), RECT{ 240, 594, 408, 614 }, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
     for (int i = 0; i < kBarsCount; i++) {
         RECT br = bar_rect(i);
@@ -1799,21 +1815,21 @@ static void draw_settings(HWND h, HDC dc, const RECT& rc) {
         COLORREF border = sel ? ACCENT : RGB(0xE3, 0xE7, 0xEE);
         draw_rounded_rect(dc, br, 8, fill, border);
         ui_text(dc, fM, sel ? RGB(0xFF, 0xFF, 0xFF) : RGB(0x3A, 0x40, 0x48),
-                kBars[i].label, br, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                TR(kBars[i].label), br, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
-    ui_text(dc, fM, RGB(0xA0, 0xA7, 0xB0), L"周期越长，走势线覆盖的时间跨度越大",
+    ui_text(dc, fM, RGB(0xA0, 0xA7, 0xB0), TR(L"set.bars_note"),
         RECT{ 32, 694, 408, 714 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     // ---- 卡片 5：外观 ----
     draw_card(dc, 734, 228);
-    ui_text(dc, fS, SUB, L"外观", RECT{ 32, 740, 200, 762 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    ui_text(dc, fS, SUB, TR(L"sec.look"), RECT{ 32, 740, 200, 762 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-    ui_text(dc, fN, TXT, L"固定到桌面（常驻显示）", RECT{ 32, 765, 348, 795 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    ui_text(dc, fN, TXT, L"鼠标穿透（点击穿透到下层）", RECT{ 32, 797, 348, 827 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    ui_text(dc, fN, TXT, L"置于最顶层（始终在最前）", RECT{ 32, 829, 348, 859 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    ui_text(dc, fN, TXT, L"嵌入任务栏（迷你横条）", RECT{ 32, 861, 348, 891 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    ui_text(dc, fN, TXT, TR(L"set.pin"), RECT{ 32, 765, 348, 795 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    ui_text(dc, fN, TXT, TR(L"set.through"), RECT{ 32, 797, 348, 827 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    ui_text(dc, fN, TXT, TR(L"set.topmost"), RECT{ 32, 829, 348, 859 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    ui_text(dc, fN, TXT, TR(L"set.dock"), RECT{ 32, 861, 348, 891 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-    ui_text(dc, fN, TXT, L"整体不透明度", RECT{ 32, 897, 148, 923 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    ui_text(dc, fN, TXT, TR(L"set.alpha"), RECT{ 32, 897, 148, 923 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     // 不透明度滑块
     {
@@ -1830,7 +1846,7 @@ static void draw_settings(HWND h, HDC dc, const RECT& rc) {
     // 嵌入任务栏时宽度由币种数决定，这一项置灰
     {
         COLORREF lbl = g_setDock ? RGB(0xBC, 0xC2, 0xCB) : TXT;
-        ui_text(dc, fN, lbl, L"弹窗宽度", RECT{ 32, 925, 148, 951 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        ui_text(dc, fN, lbl, TR(L"set.width"), RECT{ 32, 925, 148, 951 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
         double t = (g_widthVal - POPUP_W_MIN) / (double)(POPUP_W_MAX - POPUP_W_MIN);
         if (t < 0) t = 0; if (t > 1) t = 1;
@@ -1838,7 +1854,7 @@ static void draw_settings(HWND h, HDC dc, const RECT& rc) {
         draw_slider(dc, SL2_CY, SL_X1 + (int)(t * (SL_X2 - SL_X1)), SL_X1, SL_X2, acc);
 
         wchar_t wp[32];
-        if (g_setDock) swprintf(wp, _countof(wp), L"自动");
+        if (g_setDock) swprintf(wp, _countof(wp), TR(L"set.auto"));
         else           swprintf(wp, _countof(wp), L"%d px", g_widthVal);
         ui_text(dc, fN, g_setDock ? RGB(0xC2, 0xC7, 0xCF) : SUB, wp,
                 RECT{ 340, 925, 404, 951 }, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
@@ -1846,10 +1862,10 @@ static void draw_settings(HWND h, HDC dc, const RECT& rc) {
 
     // 页脚说明（本页没有保存按钮，改动直接落盘）
     if (g_setDock) {
-        ui_text(dc, fM, RGB(0xA0, 0xA7, 0xB0), L"嵌入任务栏：横条可左右拖动，位置自动记住",
+        ui_text(dc, fM, RGB(0xA0, 0xA7, 0xB0), TR(L"set.footer_dock"),
             RECT{ 32, 970, 408, 986 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     } else {
-        ui_text(dc, fM, RGB(0xA0, 0xA7, 0xB0), L"改动即刻保存并生效，关闭窗口无需确认",
+        ui_text(dc, fM, RGB(0xA0, 0xA7, 0xB0), TR(L"set.footer"),
             RECT{ 32, 970, 408, 986 }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     }
 }
@@ -1912,7 +1928,7 @@ static bool apply_settings(HWND h) {
         if (a != std::string::npos) coins.push_back(s.substr(a, b - a + 1));
     }
     if (coins.empty()) {
-        MessageBoxW(h, L"请至少保留一个关注币种", L"提示", MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(h, TR(L"msg.keep_one"), TR(L"msg.tip"), MB_OK | MB_ICONINFORMATION);
         return false;
     }
 
@@ -1944,6 +1960,28 @@ static bool apply_settings(HWND h) {
 static void settings_save_now() {
     Lock(); Config c = g_cfg; Unlock();
     config_save(c, nullptr);
+}
+
+// 切换界面语言：写配置 + 现有窗口就地重绘，不需要重启
+static void set_language(int li) {
+    if (li < 0 || li >= i18n::count() || li == i18n::current()) return;
+    i18n::set(li);
+    Lock(); g_cfg.lang = to_a(i18n::id(li)); Unlock();
+    settings_save_now();
+
+    // 托盘提示
+    wcsncpy(g_nid.szTip, TR(L"tray.tip"), 127);
+    g_nid.szTip[127] = 0;
+    g_nid.uFlags = NIF_TIP;
+    Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+
+    // 设置窗：标题 + 全部子控件（语言胶囊自身也要重画选中态）
+    if (g_hSettings && IsWindow(g_hSettings)) {
+        SetWindowTextW(g_hSettings, TR(L"set.title"));
+        RedrawWindow(g_hSettings, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+    }
+    // 浮窗 / 任务栏横条
+    if (g_popupVisible && g_hWnd && IsWindow(g_hWnd)) popup_refresh(g_hWnd);
 }
 
 // 两个数字输入框：防抖后写入配置（编辑过程中不打字打断，也不写半截值）
@@ -2055,6 +2093,14 @@ static void create_settings_controls(HWND h) {
     CreateWindowExW(0, L"BUTTON", L"", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW | WS_TABSTOP,
         SW_X, 864, SW_W, SW_H, h, (HMENU)IDC_DOCK_SW, g_hInst, NULL);
 
+    // ---- 语言切换：标题栏右侧 3 枚小胶囊 ----
+    for (int i = 0; i < i18n::count(); i++) {
+        RECT r = lang_rect(i);
+        CreateWindowExW(0, L"BUTTON", L"", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW | WS_TABSTOP,
+            r.left, r.top, r.right - r.left, r.bottom - r.top,
+            h, (HMENU)(INT_PTR)(IDC_LANG_BASE + i), g_hInst, NULL);
+    }
+
     // ---- 底部操作：没有保存按钮，改动即时落盘 ----
 
     // 子控件字体
@@ -2154,6 +2200,21 @@ static LRESULT CALLBACK SettingsProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             Ellipse(dc, knob.left, knob.top, knob.right, knob.bottom);
             SelectObject(dc, ob2); SelectObject(dc, op2);
             DeleteObject(kb); DeleteObject(kp);
+        } else if (id >= IDC_LANG_BASE && id < IDC_LANG_BASE + 8) {
+            // 语言胶囊：当前语言橙色实心，其余白底细边
+            int li = id - IDC_LANG_BASE;
+            if (li >= i18n::count()) return 0;
+            bool sel = (li == i18n::current());
+            bool pressed = (di->itemState & ODS_SELECTED) != 0;
+            COLORREF fill = sel ? (pressed ? RGB(0xEF, 0x86, 0x0C) : RGB(0xF7, 0x93, 0x1A))
+                                : (hover ? RGB(0xF3, 0xF5, 0xF9) : RGB(0xFF, 0xFF, 0xFF));
+            COLORREF border = sel ? fill : (hover ? RGB(0xD8, 0xDD, 0xE6) : RGB(0xE3, 0xE7, 0xEE));
+            RECT br = rc;
+            InflateRect(&br, -1, -1);
+            draw_rounded_rect(dc, br, 12, fill, border);
+            ui_text(dc, (HFONT)GetPropW(h, L"fontSmall"),
+                    sel ? RGB(0xFF, 0xFF, 0xFF) : RGB(0x3A, 0x40, 0x48),
+                    i18n::native_name(li), rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         } else if (id >= IDC_PF_BASE && id < IDC_PF_BASE + 8) {
             // 数据源按钮：选中橙色实心，未选中白底 + 细边
             int pf = id - IDC_PF_BASE;
@@ -2172,7 +2233,7 @@ static LRESULT CALLBACK SettingsProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             COLORREF fill = hover ? RGB(0xE6, 0xE8, 0xED) : RGB(0xF1, 0xF2, 0xF5);
             if (pressed) fill = RGB(0xDD, 0xE0, 0xE6);
             draw_rounded_rect(dc, rc, 8, fill, RGB(0xE3, 0xE7, 0xEE));
-            const wchar_t* label = (id == IDC_ADD) ? L"添加" : L"删除";
+            const wchar_t* label = (id == IDC_ADD) ? TR(L"btn.add") : TR(L"btn.del");
             ui_text(dc, (HFONT)GetPropW(h, L"fontNormal"), RGB(0x2B, 0x30, 0x36),
                     label, rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
@@ -2203,6 +2264,11 @@ static LRESULT CALLBACK SettingsProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         }
         for (int i = 0; !newHover && i < market_platform_count(); i++) {   // 数据源按钮
             HWND c = GetDlgItem(h, IDC_PF_BASE + i); if (!c) continue;
+            RECT wr; GetWindowRect(c, &wr);
+            if (PtInRect(&wr, pts)) newHover = c;
+        }
+        for (int i = 0; !newHover && i < i18n::count(); i++) {              // 语言胶囊
+            HWND c = GetDlgItem(h, IDC_LANG_BASE + i); if (!c) continue;
             RECT wr; GetWindowRect(c, &wr);
             if (PtInRect(&wr, pts)) newHover = c;
         }
@@ -2318,6 +2384,11 @@ static LRESULT CALLBACK SettingsProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             (code == EN_CHANGE || code == EN_SETFOCUS || code == EN_KILLFOCUS)) {
             if (code == EN_CHANGE) SetTimer(h, 6, 600, NULL);   // 防抖：连打不用每键都写盘
             InvalidateRect(h, NULL, FALSE);
+            return 0;
+        }
+        if (id >= IDC_LANG_BASE && id < IDC_LANG_BASE + 8) {
+            int li = id - IDC_LANG_BASE;
+            if (li < i18n::count()) set_language(li);
             return 0;
         }
         if (id >= IDC_PF_BASE && id < IDC_PF_BASE + 8) {
@@ -2463,7 +2534,7 @@ static void open_settings() {
     int y = mi.rcWork.top + (availH - H) / 2;
     if (y < mi.rcWork.top) y = mi.rcWork.top;
 
-    g_hSettings = CreateWindowExW(0, L"CryptoTraySettings", L"CryptoTray 设置",
+    g_hSettings = CreateWindowExW(0, L"CryptoTraySettings", TR(L"set.title"),
         WS_POPUP, x, y, W, H, NULL, NULL, g_hInst, NULL);
     ShowWindow(g_hSettings, SW_SHOW);
     SetForegroundWindow(g_hSettings);
@@ -2477,6 +2548,18 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE, LPSTR cmdLine, int) {
 
     InitializeCriticalSection(&g_cs);
     config_load(g_cfg, nullptr);
+
+    // 界面语言：配置里有就用配置；首次运行按系统 UI 语言自动选一次并落盘
+    {
+        int li = i18n::from_id(g_cfg.lang);
+        if (li < 0) {
+            li = i18n::detect_system();
+            g_cfg.lang = to_a(i18n::id(li));
+            config_save(g_cfg, nullptr);
+        }
+        i18n::set(li);
+        i18n::audit_missing();     // 调试输出里能看出词表漏译
+    }
 
     g_fontName = CreateFontW(-13, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, 0, 0, L"Microsoft YaHei");
     g_fontPrice = CreateFontW(-15, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, 0, 0, L"Microsoft YaHei");

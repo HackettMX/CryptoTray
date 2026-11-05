@@ -37,6 +37,7 @@ bool config_load(Config& c, std::string* err) {
         std::string k = trim(line.substr(0, eq));
         std::string v = trim(line.substr(eq + 1));
         if (k == "platform") { if (!v.empty()) c.platform = v; }
+        else if (k == "lang") { if (!v.empty()) c.lang = v; }
         else if (k == "bg_interval") c.bgInterval = atoi(v.c_str());
         else if (k == "win_interval") c.winInterval = atoi(v.c_str());
         else if (k == "coins") {
@@ -92,7 +93,9 @@ bool config_save(const Config& c, std::string* err) {
     f << "# kline_bar   : 走势图 K 线周期 (5m/15m/1H/4H/1D/1W/1M/3M)\n";
     f << "# popup_width : 弹窗宽度 260-460 (默认 300，越小越紧凑)\n";
     f << "# platform    : 数据源 okx/binance/bybit/gate/mexc/kucoin/htx/bitget\n";
+    f << "# lang        : 界面语言 zh-CN / zh-TW / en-US (留空 = 按系统语言自动选)\n";
     f << "platform=" << c.platform << "\n";
+    f << "lang=" << c.lang << "\n";
     f << "bg_interval=" << c.bgInterval << "\n";
     f << "win_interval=" << c.winInterval << "\n";
     f << "coins=";

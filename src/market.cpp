@@ -263,7 +263,7 @@ static bool parse_ticker(int pf, const JsonValue& root,
     switch (pf) {
     case PF_OKX: {
         const std::string& code = root["code"].str;
-        if (code == "50011") { set_cooldown(); err = "限频，稍后重试"; return false; }
+        if (code == "50011") { set_cooldown(); err = "rate limited"; return false; }
         if (code != "0") { err = "code " + code; return false; }
         if (root["data"].size() == 0) { err = "empty data"; return false; }
         const JsonValue& d = root["data"].at(0);
@@ -312,7 +312,7 @@ static bool parse_ticker(int pf, const JsonValue& root,
     }
     case PF_KUCOIN: {
         const std::string& code = root["code"].str;
-        if (code == "429000") { set_cooldown(); err = "限频，稍后重试"; return false; }
+        if (code == "429000") { set_cooldown(); err = "rate limited"; return false; }
         if (code != "200000") { err = "code " + code; return false; }
         const JsonValue& d = root["data"];
         last = jnum(d["last"]);
@@ -433,18 +433,21 @@ void market_clear_cache() {
 // 各家说「这个交易对我没有」的方式五花八门（HTTP 400、code 51001、
 // "Not supported symbols"、data 为空…），统一成一句人能看懂的话。
 // 原始信息只留给调试输出，界面上不展示错误码。
+// 统一成机器键（纯 ASCII）：由界面层 i18n::err_text 翻成当前语言。
+// 认不出的原始报错（平台返回的文本）原样传上去，由界面层做 UTF-8 直显。
 static std::string friendly_err(const std::string& raw) {
-    if (raw.empty()) return "取数失败";
-    if (raw == "timeout") return "请求超时";
-    if (raw == "busy") return "上一轮未完成，已跳过";
-    if (raw == "rate limited") return "刷新过频，本轮跳过";
+    if (raw.empty()) return "fail";
+    if (raw == "timeout") return "timeout";
+    if (raw == "busy") return "busy";
+    if (raw == "rate limited") return "rate";
+    if (raw == "cooldown") return "cooldown";
     if (raw.find("http 400") != std::string::npos ||
         raw.find("http 404") != std::string::npos ||
         raw.find("Not supported") != std::string::npos ||
         raw.find("code 51001") != std::string::npos ||
         raw.find("code 51000") != std::string::npos ||
         raw == "bad price" || raw == "empty data" || raw == "error")
-        return "该平台无此交易对";
+        return "notfound";
     return raw;
 }
 
@@ -461,7 +464,7 @@ bool market_fetch(int pf, const std::string& sym, const std::string& bar,
     out.changePct = 0; out.spark.clear(); out.err.clear();
 
     if (pf < 0 || pf >= PF_COUNT) return fetch_fail(out, err, "invalid platform");
-    if (GetTickCount64() < g_cooldownUntil) return fetch_fail(out, err, "限频冷却中");
+    if (GetTickCount64() < g_cooldownUntil) return fetch_fail(out, err, "cooldown");
 
     const std::string norm = market_norm_symbol(sym);
     const std::wstring host = kPf[pf].host;

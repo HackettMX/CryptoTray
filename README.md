@@ -68,6 +68,7 @@
 |---|---|---|
 | 🧩 | **两种形态** | 嵌入任务栏的迷你横条 / 带走势图的悬浮窗，一键切换 |
 | 🌐 | **8 家公开行情源** | OKX · Binance · Bybit · Gate · MEXC · KuCoin · HTX · Bitget，可随时切换 |
+| 🈶 | **多语言** | 简体中文 / 繁體中文 / English，首次运行跟随系统语言，设置窗内一键切换（无需重启） |
 | ⚡ | **秒级刷新** | 后台 / 前台两档刷新间隔，最短 1 秒 |
 | 📈 | **涨跌跟随周期** | 显示所选周期窗口内的净涨跌，切换周期（5 分钟 ~ 3 月）后联动变化 |
 | 🛡️ | **不卡顿、不排队** | 每个请求 1 秒硬超时；上一轮未完成则忽略，绝不堆积 |
@@ -94,7 +95,7 @@
 
 前往 [**Releases**](https://github.com/mxcos-source/CryptoTray/releases/latest) 下载：
 
-- `CryptoTray-<版本>-win64.zip`（如 `CryptoTray-1.0.1-win64.zip`）—— 解压后直接运行 `CryptoTray.exe`
+- `CryptoTray-<版本>-win64.zip`（如 `CryptoTray-1.0.2-win64.zip`）—— 解压后直接运行 `CryptoTray.exe`
 - 适用 Windows 10 / 11（x64），**免安装**，单文件，无需 .NET / VC++ 运行库
 
 > 首次运行如遇 SmartScreen 提示（未知发布者），点「更多信息 → 仍要运行」即可。
@@ -110,6 +111,10 @@
 4. 配置自动保存于 `%APPDATA%\CryptoTray\config.ini`。
 
 > 托盘右键菜单里还有「置于最顶层 / 鼠标穿透 / 嵌入任务栏」等开关，以及「赞助支持」入口。
+
+### 切换语言
+
+设置窗右上角有三枚胶囊：**简体 / 繁體 / EN**。点一下立即切换——托盘菜单、悬浮窗、设置页全部就地重绘，**不需要重启**；选择会写入配置文件，下次启动保持。首次运行没有配置时会按系统 UI 语言自动选择。
 
 ### 币种写法
 
@@ -168,9 +173,10 @@ cmake --build build
 │   ├── market.cpp     # 多平台行情抽象：符号归一化、ticker / K 线请求与解析
 │   ├── http.cpp       # WinHTTP 封装：超时、长连接复用、客户端限频
 │   ├── config.cpp     # 配置读写（原子写入）
+│   ├── i18n.cpp       # 三语文案表（简 / 繁 / EN），按 key 查表、缺译回退
 │   ├── json.hpp       # 极简 JSON 解析器
 │   ├── util.hpp       # 编码转换、锁等通用工具
-│   └── market.hpp / http.hpp / config.hpp
+│   └── market.hpp / http.hpp / config.hpp / i18n.hpp
 ├── test_okx.cpp       # 行情冒烟测试
 ├── test_rate.cpp      # 限频测试
 ├── test_timeout.cpp   # 超时测试
@@ -186,6 +192,7 @@ cmake --build build
 - **WinHTTP** 长连接复用；`WinHttpSetTimeouts` + 总 deadline 双保险，1 秒内必须返回。
 - **单线程串行拉取 + 固定节拍**：刷新节奏由拉取线程自己掌握，不被消息队列延迟影响。
 - **数据代数（generation）**：切换平台 / 币种 / 周期时作废旧轮请求，新配置立刻接管，不等旧请求。
+- **文案单一来源**：所有界面文字收在 `src/i18n.cpp` 的三语表里（一行 = 一个 key + 三种语言），代码里只写 `TR(L"key")`；行情错误以机器键（`timeout` / `notfound` …）从数据层传出，由界面层翻译。
 
 ## 已知限制
 
