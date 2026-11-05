@@ -60,6 +60,12 @@
 #define IDM_TOPMOST  1003
 #define IDM_THROUGH  1004
 #define IDM_DOCK     1005
+#define IDM_SPONSOR  1006
+#define IDM_STAR     1007
+
+// 项目与赞助地址
+#define APP_SPONSOR_URL L"https://sponsor.mxcos.com"
+#define APP_REPO_URL    L"https://github.com/mxcos-source/CryptoTray"
 
 #define IDC_BG       2001
 #define IDC_WIN      2002
@@ -1257,6 +1263,9 @@ static void show_context_menu() {
     CheckMenuItem(m, IDM_THROUGH, MF_BYCOMMAND | (g_cfg.mouseThrough ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(m, IDM_DOCK, MF_BYCOMMAND | (g_cfg.dockTaskbar ? MF_CHECKED : MF_UNCHECKED));
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(m, MF_STRING, IDM_SPONSOR, L"❤ 赞助支持");
+    AppendMenuW(m, MF_STRING, IDM_STAR, L"为项目点个 Star");
+    AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING, IDM_EXIT, L"退出");
     // 菜单位置：TPM_BOTTOMALIGN 让菜单底边落在 p.y。
     // 光标在任务栏里时，把 p.y 抬到该显示器工作区的底边，
@@ -1341,6 +1350,12 @@ static LRESULT CALLBACK MsgWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             config_save(g_cfg, nullptr);
             if (g_hSettings && IsWindow(g_hSettings))
                 InvalidateRect(GetDlgItem(g_hSettings, IDC_DOCK_SW), NULL, FALSE);
+        }
+        else if (LOWORD(w) == IDM_SPONSOR) {
+            ShellExecuteW(NULL, L"open", APP_SPONSOR_URL, NULL, NULL, SW_SHOWNORMAL);
+        }
+        else if (LOWORD(w) == IDM_STAR) {
+            ShellExecuteW(NULL, L"open", APP_REPO_URL, NULL, NULL, SW_SHOWNORMAL);
         }
         return 0;
     case WM_REFRESH:

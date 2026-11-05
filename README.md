@@ -8,6 +8,7 @@
   <img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D4?logo=windows&logoColor=white" alt="platform">
   <img src="https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white" alt="c++17">
   <a href="https://github.com/mxcos-source/CryptoTray/releases"><img src="https://img.shields.io/github/downloads/mxcos-source/CryptoTray/total?color=F7931A&label=downloads" alt="downloads"></a>
+  <a href="#赞助支持"><img src="https://img.shields.io/badge/Sponsor-请我喝杯咖啡-EA4AAA?logo=githubsponsors&logoColor=white" alt="sponsor"></a>
 </p>
 
 <p align="center">
@@ -31,6 +32,7 @@
 - [项目结构](#项目结构)
 - [技术要点](#技术要点)
 - [已知限制](#已知限制)
+- [赞助支持](#赞助支持)
 - [免责声明](#免责声明)
 - [License](#license)
 
@@ -92,7 +94,7 @@
 
 前往 [**Releases**](https://github.com/mxcos-source/CryptoTray/releases/latest) 下载：
 
-- `CryptoTray-1.0.0-win64.zip` —— 解压后直接运行 `CryptoTray.exe`
+- `CryptoTray-<版本>-win64.zip`（如 `CryptoTray-1.0.1-win64.zip`）—— 解压后直接运行 `CryptoTray.exe`
 - 适用 Windows 10 / 11（x64），**免安装**，单文件，无需 .NET / VC++ 运行库
 
 > 首次运行如遇 SmartScreen 提示（未知发布者），点「更多信息 → 仍要运行」即可。
@@ -106,6 +108,8 @@
    - 勾选「嵌入任务栏（迷你横条）」变成任务栏横条。
 3. **双击托盘图标**显示 / 隐藏浮窗。
 4. 配置自动保存于 `%APPDATA%\CryptoTray\config.ini`。
+
+> 托盘右键菜单里还有「置于最顶层 / 鼠标穿透 / 嵌入任务栏」等开关，以及「赞助支持」入口。
 
 ### 币种写法
 
@@ -189,6 +193,35 @@ cmake --build build
 - 公共接口按 IP 限频：币种多 + 1 秒刷新会撞到频控，此时数据约 1~2 秒一轮属正常现象。
 - 不同平台对同一币种的现货 / 合约支持不同；若该平台没有此交易对，会提示「该平台无此交易对」。
 - 预览图为界面示意，实际效果以运行为准。
+
+## 赞助支持
+
+CryptoTray 完全免费：没有会员、没有功能墙、没有内购，也不收集任何数据。如果它帮你省下了每天切浏览器看行情的时间，可以请作者喝杯咖啡 ☕
+
+<p align="center">
+  <a href="https://sponsor.mxcos.com"><img src="https://img.shields.io/badge/赞助主页-sponsor.mxcos.com-F7931A?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="赞助主页"></a>
+  <a href="https://afdian.com/a/mxcos"><img src="https://img.shields.io/badge/爱发电-点此支持-946CE6?style=for-the-badge" alt="爱发电"></a>
+  <a href="https://github.com/sponsors/mxcos"><img src="https://img.shields.io/badge/GitHub%20Sponsors-赞助-EA4AAA?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="GitHub Sponsors"></a>
+</p>
+
+<table align="center">
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/sponsor/alipay.png" width="210" alt="支付宝收款码"><br>
+      <b>支付宝</b> · 扫码赞助
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/sponsor/wechat.png" width="210" alt="微信赞赏码"><br>
+      <b>微信</b> · 扫码赞助
+    </td>
+  </tr>
+</table>
+
+也可以在应用内直接打开：**托盘图标右键 → 赞助支持**。
+
+**赞助纯属自愿**——不解锁任何功能，也不影响使用。所有赞助用于持续开发与多平台接口的测试开销。如果暂时不方便，给个 ⭐ **Star** 或帮忙反馈一个 Bug，同样是很大的支持。
+
+> 感谢每一位使用者。你的 Star、Issue 和赞助，是这个项目能一直更新的原因。
 
 ## 免责声明
 

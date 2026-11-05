@@ -1,0 +1,6 @@
+# 赞助配置：配置后仓库页右上角会出现「Sponsor / 赞助」按钮
+# 说明见 https://docs.github.com/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/displaying-a-sponsor-button-in-your-repository
+github: [mxcos]
+custom:
+  - https://sponsor.mxcos.com
+  - https://afdian.com/a/mxcos
