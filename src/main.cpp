@@ -137,6 +137,7 @@ static bool g_hidePending = false;
 // 拖动状态（弹窗与设置窗口共用，同一时刻仅一个在拖动）
 static bool g_dragging = false;
 static bool g_dragDock = false;      // 拖动开始时是否处于停靠形态
+static bool g_dragAlong = false;     // 本次拖动是否「沿任务栏挪位置」（锁存，带迟滞）
 static bool g_dragMoved = false;     // 是否真的移动过（区分「单击」与「拖动」）
 static POINT g_dragStart = { 0, 0 };
 static RECT g_dragRect = { 0, 0, 0, 0 };
@@ -729,6 +730,58 @@ static bool dock_x_free(int x, int W, LONG lo, LONG hi) {
     return false;
 }
 
+// ---- 拖动时用的邻居占位缓存 ----
+// 拖动是 60fps 的循环，每帧再 EnumWindows 一遍全系统顶层窗口（还带 DwmGetWindowAttribute）
+// 会把消息循环拖住；而邻居位置在几百毫秒内不会变，缓存 200ms 完全够用
+static DWORD g_occTick = 0;
+static bool  g_occValid = false;
+static XSpan g_occ[DOCK_OCC_MAX];
+static int   g_occN = 0;
+static RECT  g_occTr = { 0, 0, 0, 0 };
+
+static int occ_cached(XSpan* out, int cap, RECT& tr) {
+    const DWORD now = GetTickCount();
+    if (!g_occValid || now - g_occTick > 200) {
+        g_occTick = now;
+        g_occValid = true;
+        RECT mon;
+        g_occN = taskbar_rect(g_occTr, mon) ? occ_collect(g_occTr, g_occ, DOCK_OCC_MAX) : 0;
+    }
+    tr = g_occTr;
+    int n = g_occN < cap ? g_occN : cap;
+    for (int i = 0; i < n; i++) out[i] = g_occ[i];
+    return n;
+}
+
+// 拖动时的「墙」：横条不许压到邻居身上，碰到就顶住。
+// 注意这里只做「夹取」不换段——不能像 dock_fit_x 那样跳到另一个空档去，
+// 否则每帧一个新落点，看起来就是横条自己在闪。
+// 往哪一侧推，取决于窗口现在在哪一侧（用窗口而不是光标判断），
+// 这样一旦推到卡片左边就稳定待在左边，不会在卡片中间来回穿。
+static int dock_clamp_x(int x, int W, int curX, LONG lo, LONG hi) {
+    XSpan occ[DOCK_OCC_MAX];
+    RECT tr;
+    const int n = occ_cached(occ, DOCK_OCC_MAX, tr);
+
+    for (int pass = 0; pass < 4; pass++) {
+        bool hit = false;
+        for (int i = 0; i < n; i++) {
+            const LONG oa = occ[i].lo - DOCK_GAP;
+            const LONG ob = occ[i].hi + DOCK_GAP;
+            if (x + W <= oa || x >= ob) continue;          // 没相交
+            if (curX + W / 2 < (oa + ob) / 2) {            // 本来在左边：顶在左壁上
+                if (x + W > oa) { x = (int)(oa - W); hit = true; }
+            } else {                                        // 本来在右边：顶在右壁上
+                if (x < ob) { x = (int)ob; hit = true; }
+            }
+        }
+        if (!hit) break;
+    }
+    if (x < lo)         x = (int)lo;
+    if (x + W > hi)     x = (int)(hi - W);
+    return x;
+}
+
 // 内嵌任务栏：横条落在任务栏内部（覆盖在任务栏之上的同层窗口），竖直居中
 static bool dock_place(int W, int H, int& x, int& y) {
     RECT tr, mon;
@@ -1315,9 +1368,15 @@ static int g_hintW = 0, g_hintH = 0;      // 上次设定的窗口圆角尺寸
 static void hint_show(bool locked, int x, int y, int w, int h) {
     if (w < 90) w = 90;
     if (h < 26) h = 26;
+    // 位置、尺寸、文案都没变就什么都不做：拖动时每帧都调 SetWindowRgn +
+    // InvalidateRect + UpdateWindow，等于 60fps 同步重画整个落点框，看着就是闪
+    const bool same = g_hintOn && locked == g_hintDock &&
+                      g_hintRc.left == x && g_hintRc.top == y &&
+                      g_hintRc.right == x + w && g_hintRc.bottom == y + h;
     g_hintDock = locked;
     g_hintRc = { x, y, x + w, y + h };
-    if (!g_hHint || !IsWindow(g_hHint)) return;
+    if (!g_hHint || !IsWindow(g_hHint)) { g_hintOn = true; return; }
+    if (same) return;
     g_hintOn = true;
 
     // 尺寸变了才重设圆角区域：让四角真的被裁掉，不然会露出半透明黑角
@@ -1333,6 +1392,7 @@ static void hint_show(bool locked, int x, int y, int w, int h) {
 }
 
 static void hint_hide() {
+    if (!g_hintOn) return;                 // 已经隐藏：别再每帧 ShowWindow
     g_hintOn = false;
     if (g_hHint && IsWindow(g_hHint)) ShowWindow(g_hHint, SW_HIDE);
 }
@@ -1559,6 +1619,7 @@ static LRESULT CALLBACK MsgWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 // 轮询则始终跟手；松手也由轮询检测按键状态，捕获丢了也能正确结束。
 static HWND g_dragHwnd = NULL;
 static DWORD g_dragTick = 0;        // 拖动起点，给按键检测留一段宽限
+static DWORD g_dragHintTick = 0;    // 上次算落点框的时间（节流用）
 static void drag_update(HWND h);
 static void drag_finish(HWND h);
 
@@ -1599,52 +1660,73 @@ static void drag_update(HWND h) {
     if (nx + W > mr.right) nx = mr.right - W;
     if (ny + H > mr.bottom) ny = mr.bottom - H;
 
-    // 落点判定以「窗口边缘」到任务栏/虚线框的间距为准，不再看光标：
-    // 光标按在窗口的哪一处并不固定，只看光标会和眼里看到的窗口位置对不上。
-    //   gap > 96px        → 不提示
-    //   8px < gap <= 96px → 「将窗口移到此处」（靠近了，还没贴上）
-    //   窗口贴住虚线框    → 「松手固定窗口」
-    bool nearBar = false, locked = false;
-    int hx = nx, hy = ny, hw = W, hh = H;
     RECT tr, mon;
     const bool hasBar = taskbar_rect(tr, mon) && (tr.right - tr.left) > (tr.bottom - tr.top);
-    const bool cursorOnBar = hasBar && PtInRect(&tr, pt);
-    if (hasBar) {
+
+    // 「沿任务栏拖」用锁存，而不是每帧看光标在不在任务栏里：
+    // 手拖时纵向总会抖几像素，条件一翻转落点框就跟着出现/消失，看着就是闪。
+    // 一旦认定在沿栏拖，只有光标抬离任务栏超过一个任务栏高才回到「拖出去」模式
+    if (hasBar && g_dragDock) {
+        const int trayH = tr.bottom - tr.top;
+        if (pt.y > tr.top - trayH)          g_dragAlong = true;
+        if (pt.y < tr.top - trayH * 3 / 2)  g_dragAlong = false;
+    } else {
+        g_dragAlong = false;
+    }
+
+    RECT cr0;
+    const int curX = GetWindowRect(h, &cr0) ? (int)cr0.left : nx;
+
+    if (hasBar && g_dragAlong) {
+        // 沿任务栏挪位置：水平跟手，竖直锁在任务栏里。
+        // 邻居只当「墙」用（碰到就停），不换段、不每帧重算落点 ——
+        // 否则鼠标扫过汽水播控时它会跟着反复重排，那才是「越拖越闪」
+        const int trayH = tr.bottom - tr.top;
+        ny = tr.top + (trayH - H) / 2;
+        LONG lo = 0, hi = 0;
+        taskbar_free_span(lo, hi);
+        nx = dock_clamp_x(nx, W, curX, lo, hi);
+        hint_hide();
+    } else if (hasBar) {
+        // 从浮窗拖向任务栏：算落点框。目标位置要查邻居（EnumWindows），
+        // 节流到 ~60ms 一次；hint_show 内部还会跳过没有变化的重绘
         const int trayH = tr.bottom - tr.top;
         const bool barOnTop = (tr.top <= mon.top + 2);          // 任务栏吸顶的情况
         const int gap = barOnTop ? (ny - tr.bottom)             // 窗口顶边到任务栏底边
                                  : (tr.top - (ny + H));         // 窗口底边到任务栏顶边
-        if (gap <= 96) {
-            nearBar = true;
-            hw = dock_w();
-            hh = dock_h();
-            LONG lo = 0, hi = 0;
-            taskbar_free_span(lo, hi);
-            int off = pt.x - tr.left - hw / 2;          // 落点框跟光标水平居中对齐
-            if (off + hw > (int)(hi - tr.left)) off = (int)(hi - tr.left) - hw;
-            if (off < (int)(lo - tr.left)) off = (int)(lo - tr.left);
-            if (off < 4) off = 4;
-            // 磁吸到空档：落点框同样不压在汽水播控这类邻居身上
-            hx = dock_fit_x(hw, lo, hi, tr.left + off);
-            hy = tr.top + (trayH - hh) / 2;
+        if (gap <= 96) {                                        // gap > 96px 不提示
+            const DWORD now = GetTickCount();
+            if (now - g_dragHintTick >= 60) {
+                g_dragHintTick = now;
+                const int hw = dock_w(), hh = dock_h();
+                LONG lo = 0, hi = 0;
+                taskbar_free_span(lo, hi);
+                int off = pt.x - tr.left - hw / 2;      // 落点框跟光标水平居中对齐
+                if (off + hw > (int)(hi - tr.left)) off = (int)(hi - tr.left) - hw;
+                if (off < (int)(lo - tr.left)) off = (int)(lo - tr.left);
+                if (off < 4) off = 4;
+                const int hx = dock_fit_x(hw, lo, hi, tr.left + off);
+                const int hy = tr.top + (trayH - hh) / 2;
 
-            // 窗口边缘贴住虚线框（差 8px 内）→ 松手即固定。
-            // 用虚线框而不是任务栏当基准，切换点才和眼睛看到的一致
-            const int gapBox = barOnTop ? (ny - (hy + hh)) : (hy - (ny + H));
-            locked = (gapBox <= 8) ||
-                     (barOnTop ? (pt.y <= tr.bottom) : (pt.y >= tr.top));
+                // 窗口边缘贴住虚线框（差 8px 内）→ 松手即固定
+                const int gapBox = barOnTop ? (ny - (hy + hh)) : (hy - (ny + H));
+                const bool locked = (gapBox <= 8) ||
+                                    (barOnTop ? (pt.y <= tr.bottom) : (pt.y >= tr.top));
+                hint_show(locked, hx, hy, hw, hh);
+            }
+        } else {
+            hint_hide();
         }
+    } else {
+        hint_hide();
     }
-    // 已经是横条、光标也还在任务栏里：这只是在沿任务栏挪位置，不需要落点框；
-    // 点一下（带几像素手抖）更不该弹出框来闪一下
-    if (nearBar && !(g_dragDock && cursorOnBar)) hint_show(locked, hx, hy, hw, hh);
-    else                                         hint_hide();
 
-    // 沿任务栏拖动时窗口也吸到空档上，别让它从汽水播控这类控件身上扫过去：
-    // 掠过的瞬间对方会挪位 / 收缩，肉眼看到的就是「一直在闪」
-    if (nearBar && g_dragDock && cursorOnBar) { nx = hx; ny = hy; }
-
-    SetWindowPos(h, HWND_TOPMOST, nx, ny, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+    // 位置没变就不要 SetWindowPos：WM_MOUSEMOVE 和 16ms 轮询会双触发，
+    // 一次移动变成两次搬家。另外这里用 SWP_NOZORDER —— 每帧 HWND_TOPMOST 都会把
+    // 横条提到置顶组最前面，置顶组里的汽水播控于是被反复重组、重绘，跟着一起闪
+    if (!GetWindowRect(h, &cr0) || cr0.left != nx || cr0.top != ny)
+        SetWindowPos(h, NULL, nx, ny, 0, 0,
+                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 static void drag_finish(HWND h) {
@@ -1678,7 +1760,22 @@ static void drag_finish(HWND h) {
         g_cfg.dockTaskbar = true;
         g_setDock = true;
         RECT tr, mon;
-        if (taskbar_rect(tr, mon)) g_cfg.dockOffsetX = hr.left - tr.left;
+        if (taskbar_rect(tr, mon)) {
+            // 拖动中的落点框有 60ms 节流，可能比光标滞后半帧；落定这一刻按光标重算一次。
+            // 邻居避让也只在这里做一回（而不是拖动中每帧），松手后横条直接出现在空档里
+            int off = hr.left - tr.left;
+            const int hw = dock_w();
+            LONG lo = 0, hi = 0;
+            if (hw > 0 && taskbar_free_span(lo, hi)) {
+                POINT cp; GetCursorPos(&cp);
+                int want = cp.x - tr.left - hw / 2;
+                if (want + hw > (int)(hi - tr.left)) want = (int)(hi - tr.left) - hw;
+                if (want < (int)(lo - tr.left))      want = (int)(lo - tr.left);
+                if (want < 4) want = 4;
+                off = dock_fit_x(hw, lo, hi, tr.left + want) - tr.left;
+            }
+            g_cfg.dockOffsetX = off;
+        }
     } else {
         // 没对准任务栏：按当前位置落回浮窗（也覆盖「从横条拖出去」的情况）
         RECT r; GetWindowRect(h, &r);
@@ -1735,8 +1832,10 @@ static LRESULT CALLBACK PopupProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         g_dragging = true;
         g_dragHwnd = h;
         g_dragTick = GetTickCount();
+        g_dragHintTick = 0;
         g_dragMoved = false;
         g_dragDock = g_cfg.dockTaskbar;
+        g_dragAlong = g_dragDock;
         GetCursorPos(&g_dragStart);
         GetWindowRect(h, &g_dragRect);
         SetCapture(h);
